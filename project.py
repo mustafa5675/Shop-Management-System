@@ -76,34 +76,27 @@ def view_sales():
         df.to_csv("sales_view_backup.csv", index=False)
         print("\nSales records exported to sales_view_backup.csv")
 
-        # 5. Add graphs (Monthly & Yearly Analysis)
-        # Convert SaleDate to datetime
-        df['SaleDate'] = pd.to_datetime(df['SaleDate'])
+        # 5. Sales Analysis Graphs
+        # Weekly sales trend
+        weekly = df.resample('W', on='SaleDate')['TotalAmount'].sum()
+        monthly = df.resample('M', on='SaleDate')['TotalAmount'].sum()
+        yearly = df.resample('Y', on='SaleDate')['TotalAmount'].sum()
 
-        # Monthly Sales (group by Year-Month)
-        df['YearMonth'] = df['SaleDate'].dt.to_period('M')
-        monthly_sales = df.groupby('YearMonth')['TotalAmount'].sum()
+        # Plot graphs
+        plt.figure(figsize=(14, 6))
 
-        # Yearly Sales (group by Year)
-        df['Year'] = df['SaleDate'].dt.year
-        yearly_sales = df.groupby('Year')['TotalAmount'].sum()
-
-        # --- Plot Graphs ---
-        plt.figure(figsize=(12, 5))
-
-        # Monthly Sales Graph
-        plt.subplot(1, 2, 1)
-        monthly_sales.plot(kind='bar', color='skyblue')
-        plt.title("Monthly Sales")
-        plt.xlabel("Month")
+        plt.subplot(1, 3, 1)
+        weekly.plot(kind='bar')
+        plt.title("Weekly Sales Trend")
         plt.ylabel("Total Sales")
 
-        # Yearly Sales Graph
-        plt.subplot(1, 2, 2)
-        yearly_sales.plot(kind='bar', color='lightgreen')
-        plt.title("Yearly Sales")
-        plt.xlabel("Year")
-        plt.ylabel("Total Sales")
+        plt.subplot(1, 3, 2)
+        monthly.plot(kind='bar', color='orange')
+        plt.title("Monthly Sales Trend")
+
+        plt.subplot(1, 3, 3)
+        yearly.plot(kind='bar', color='green')
+        plt.title("Yearly Sales Trend")
 
         plt.tight_layout()
         plt.show()
@@ -118,3 +111,4 @@ def view_sales():
 
 
     
+

@@ -1,4 +1,4 @@
-from sales import record_sale, view_sales, run_sales_viewer
+from Sales import record_sale, view_sales, run_sales_viewer
 from SalesReturn import record_sales_return, view_sales_return, run_sales_return_viewer
 
 def main_menu():
@@ -30,3 +30,4 @@ def main_menu():
 
 if __name__ == "__main__":
     main_menu()
+

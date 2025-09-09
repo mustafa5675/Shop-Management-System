@@ -1,5 +1,5 @@
 import csv
-from database import get_connection
+from Database import get_connection
 import pandas as pd
 
 customer_cache = [] # in-memory backup
@@ -237,4 +237,5 @@ def run_customers_viewer():
             cid = int(input("Enter Customer ID for insights: "))
             customer_insights(cid)
         else:
+
             print("❌ Invalid option.")

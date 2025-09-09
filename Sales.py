@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import datetime 
 import csv
-from database import get_connection
+from Database import get_connection
 
 sales_cache = []  # in-memory backup
 
@@ -140,4 +140,5 @@ def run_sales_viewer():
     if result is not None and form_of_data == "tabular":
         print(f"\n--- Sales Summary ({timeline.capitalize()}) ---")
         print(result)
+
         print("\n✅ Sales viewer ran successfully.")

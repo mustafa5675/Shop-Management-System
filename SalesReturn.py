@@ -142,3 +142,15 @@ def run_sales_return_viewer():
         print(result)
         print("\n✅ Sales return viewer ran successfully.")
 
+def sales_return_menu():
+    print("\n--- Sales Return Menu ---")
+    print("1. Record Sales Return")
+    print("2. View Sales Return")
+
+    while True:
+        if choice == "1":
+            record_sales_return()
+        elif choice == "2":
+            run_sales_return_viewer()
+        else:
+            print("❌ Invalid option.")

@@ -7,7 +7,7 @@ from Database import get_connection
 
 sales_cache = []  # in-memory backup
 
-def record_sale():
+def record_sales():
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -142,3 +142,16 @@ def run_sales_viewer():
         print(result)
 
         print("\n✅ Sales viewer ran successfully.")
+
+def sales_menu():
+    print("\n--- Sales Menu ---")
+    print("1. Record Sales")
+    print("2. View Sales")
+
+    while True:
+        if choice == "1":
+            record_sales()
+        elif choice == "2":
+            run_sales_viewer()
+        else:
+            print("❌ Invalid option.")

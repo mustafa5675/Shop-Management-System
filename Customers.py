@@ -209,7 +209,7 @@ def customer_insights(customer_id):
         cursor.close()
         conn.close()
 
-def run_customers_viewer():
+def customers_menu():
     print("\n--- Customer Menu ---")
     print("1. Add Customer")
     print("2. View All Customers")

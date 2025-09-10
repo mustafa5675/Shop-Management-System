@@ -14,7 +14,6 @@ def record_sales():
 
         # Input
         sale_date = input("Enter Sale Date (YYYY-MM-DD): ").strip()
-        customer_id = int(input("Enter Customer ID: "))
         product_id = int(input("Enter Product ID: "))
         quantity = int(input("Enter Quantity Sold: "))
         unit_price = float(input("Enter Unit Price: "))
@@ -28,7 +27,6 @@ def record_sales():
         # Prepare data
         sale = {
             "SaleDate": sale_date,
-            "CustomerID": customer_id,
             "ProductID": product_id,
             "Quantity": quantity,
             "UnitPrice": unit_price,
@@ -38,8 +36,8 @@ def record_sales():
 
         # Insert into DB
         sql = """
-            INSERT INTO Sales (SaleDate, CustomerID, ProductID, Quantity, UnitPrice, PaymentMethod)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO Sales (SaleDate, ProductID, Quantity, UnitPrice, PaymentMethod)
+            VALUES (%s, %s, %s, %s, %s)
         """
         cursor.execute(sql, tuple(sale.values()))
         conn.commit()

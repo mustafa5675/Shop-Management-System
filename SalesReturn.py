@@ -148,6 +148,7 @@ def sales_return_menu():
     print("2. View Sales Return")
 
     while True:
+        choice = input("Choose option: ").strip()
         if choice == "1":
             record_sales_return()
         elif choice == "2":

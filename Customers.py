@@ -217,9 +217,9 @@ def customers_menu():
     print("4. Update Customer")
     print("5. Delete Customer")
     print("6. Customer Insights")
-    choice = input("Choose option: ").strip()
 
     while True:
+        choice = input("Choose option: ").strip()
         if choice == "1":
             add_customer()
         elif choice == "2":

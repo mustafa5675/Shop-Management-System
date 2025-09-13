@@ -1,11 +1,12 @@
 # sales.py
 import pandas as pd
 import matplotlib.pyplot as plt
-import datetime 
+from datetime import datetime 
 import csv
 from Database import get_connection
 
 sales_cache = []  # in-memory backup
+now = datetime.now()
 
 def record_sales():
     try:
@@ -13,7 +14,7 @@ def record_sales():
         cursor = conn.cursor()
 
         # Input
-        sale_date = input("Enter Sale Date (YYYY-MM-DD): ").strip()
+        sale_date = now.strftime("%Y-%m-%d")
         product_id = int(input("Enter Product ID: "))
         quantity = int(input("Enter Quantity Sold: "))
         unit_price = float(input("Enter Unit Price: "))
@@ -147,6 +148,7 @@ def sales_menu():
     print("2. View Sales")
 
     while True:
+        choice = input("Choose option: ").strip()
         if choice == "1":
             record_sales()
         elif choice == "2":

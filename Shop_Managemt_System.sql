@@ -3,7 +3,7 @@ USE Shop_Management;
 
 CREATE TABLE Sales (
     SaleID INT PRIMARY KEY AUTO_INCREMENT,
-    SaleDate DATE DEFAULT CURRENT_TIMESTAMP,
+    SaleDate DATE,
     CustomerID INT,
     ProductID INT NOT NULL,
     Quantity INT NOT NULL,
@@ -50,7 +50,7 @@ CREATE TABLE Customers (
 CREATE TABLE Purchases (
     PurchaseID INT PRIMARY KEY AUTO_INCREMENT,
     InvoiceNumber VARCHAR(50) NOT NULL,       -- vendor’s bill/invoice number
-    PurchaseDate DATE DEFAULT CURRENT_TIMESTAMP,
+    PurchaseDate DATE,
     VendorID INT NOT NULL,
     ProductID INT NOT NULL,
     Quantity INT NOT NULL,
@@ -59,12 +59,9 @@ CREATE TABLE Purchases (
 
     -- credit terms
     CreditPeriodDays INT,                     -- can override vendor’s default
-    DueDate DATE GENERATED ALWAYS AS (
-        DATE_ADD(PurchaseDate, INTERVAL COALESCE(CreditPeriodDays, 0) DAY)
-    ) STORED,
+    DueDate DATE,
 
     IsPaid BOOLEAN DEFAULT FALSE,
-    PaymentDate DATE NULL,
     PaymentMethod ENUM('cash','card','online','credit') DEFAULT 'credit',
 
     FOREIGN KEY (VendorID) REFERENCES Vendors(VendorID),
@@ -100,7 +97,6 @@ CREATE TABLE Vendors (
     State VARCHAR(50),
     PostalCode DECIMAL(10,0),
     Country VARCHAR(50),
-    RegistrationDate DATE DEFAULT CURRENT_TIMESTAMP,
 	CreditPeriodDays INT   -- vendor’s standard credit terms
 );
 
@@ -179,3 +175,6 @@ CREATE TABLE Inventory (
     QuantityInStock INT NOT NULL DEFAULT 0,
     LastUpdated DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
+
+CREATE TABLE Products (ProductID INT PRIMARY KEY AUTO_INCREMENT,
+    ProductName VARCHAR(50));

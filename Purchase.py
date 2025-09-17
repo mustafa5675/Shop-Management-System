@@ -4,7 +4,7 @@ import datetime
 import csv
 from Database import get_connection
 
-sales_cache = []  # in-memory backup
+purchase_cache = []  # in-memory backup
 
 def record_purchases():
     try:
@@ -12,10 +12,10 @@ def record_purchases():
         cursor = conn.cursor()
 
         # Input
-        purchase_date = input("Enter Sale Date (YYYY-MM-DD): ").strip()
-        product_id = int(input("Enter Product ID: "))
+        purchase_date = now.strftime("%Y-%m-%d")
         quantity = int(input("Enter Quantity Sold: "))
         unit_price = float(input("Enter Unit Price: "))
+        Due_date = purchase_date + timedelta(days = credit_period_days)
         payment_method = input("Enter Payment Method (cash/card/online): ").strip().lower()
 
         # Validation
@@ -26,17 +26,18 @@ def record_purchases():
         # Prepare data
         purchase = {
             "PurchaseDate": purchase_date,
-            "ProductID": product_id,
             "Quantity": quantity,
             "UnitPrice": unit_price,
+            "CreditPeriodDays": update_credit_period(credit_period_days),
+            "DueDate":Due_date,
             "PaymentMethod": payment_method
         }
-        sales_cache.append(purchase)
+        purchase_cache.append(purchase)
 
         # Insert into DB
         sql = """
-            INSERT INTO Sales (PurchaseDate, ProductID, Quantity, UnitPrice, PaymentMethod)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO Sales (PurchaseDate, ProductID, Quantity, UnitPrice, CreditPeriodDays, PaymentMethod)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """
         cursor.execute(sql, tuple(purchase.values()))
         conn.commit()
@@ -117,8 +118,12 @@ def view_purchases(form_of_data="tabular", timeline="monthly"):
         cursor.close()
         conn.close()
 
+def update_credit_period():
+    vendor_id = int(input("Enter Vendor ID To Be Updated: "))
+    credit_period_days = int(input("Enter Credit Period: "))
+    product_id = int(input("Enter Product ID To Be Updated: "))
 
-def run_sales_viewer():
+def run_purchases_viewer():
     valid_forms = ("tabular", "line", "bar")
     valid_timelines = ("weekly", "monthly", "yearly")
 
@@ -140,15 +145,21 @@ def run_sales_viewer():
 
         print("\n✅ Sales viewer ran successfully.")
 
-def sales_menu():
-    print("\n--- Sales Menu ---")
-    print("1. Record Sales")
-    print("2. View Sales")
+def purchases_menu():
+    print("\n--- Purchases Menu ---")
+    print("1. Record Purchases")
+    print("2. View Purchases")
+    print("3. Update Credit Period")
+    print("4. Back to Main Menu")
 
     while True:
         if choice == "1":
-            record_sales()
+            record_purchases()
         elif choice == "2":
-            run_sales_viewer()
+            run_purchases_viewer()
+        elif choice == "3":
+            update_credit_period()
+        elif choice == "4":
+            break
         else:
             print("❌ Invalid option.")

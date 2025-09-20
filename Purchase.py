@@ -4,7 +4,7 @@ import datetime
 import csv
 from Database import get_connection
 
-purchase_cache = []  # in-memory backup
+purchase_cache = []  # in-memory backup 
 
 def record_purchases():
     try:
@@ -46,12 +46,12 @@ def record_purchases():
 
         # Backup CSV
         with open("purchases_backup.csv", mode="a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=sale.keys())
+            writer = csv.DictWriter(f, fieldnames=purchase.keys())
             if f.tell() == 0:
                 writer.writeheader()
-            writer.writerow(sale)
+            writer.writerow(purchase)
 
-        print("💾 Backup written into sales_backup.csv")
+        print("💾 Backup written into purchases_backup.csv")
 
     except Exception as e:
         print("❌ Error recording sale:", e)
@@ -65,12 +65,18 @@ def view_purchases(form_of_data="tabular", timeline="monthly"):
         conn = get_connection()
         cursor = conn.cursor()
 
-        # 1. Fetch all sales
-        cursor.execute("SELECT PurchaseID, PurchaseDate, VendorID, ProductID, Quantity, UnitPrice, TotalAmount, PaymentMethod FROM Purchases")
+        # Fetch purchases linked with vendor
+        query = """
+            SELECT p.PurchaseID, p.PurchaseDate, p.ProductID, p.Quantity, p.TotalAmount, v.VendorName
+            FROM Purchases p
+            JOIN Vendors v ON p.VendorID = v.VendorID
+            WHERE v.VendorName LIKE %s
+        """
+        cursor.execute(query, (f"%{vendor_name}%",))
         rows = cursor.fetchall()
 
         if not rows:
-            print("⚠ No sales records found.")
+            print("⚠ No purchases records found.")
             return None
 
         # 2. Load into Pandas for analysis
@@ -118,11 +124,6 @@ def view_purchases(form_of_data="tabular", timeline="monthly"):
         cursor.close()
         conn.close()
 
-def update_credit_period():
-    vendor_id = int(input("Enter Vendor ID To Be Updated: "))
-    credit_period_days = int(input("Enter Credit Period: "))
-    product_id = int(input("Enter Product ID To Be Updated: "))
-
 def run_purchases_viewer():
     valid_forms = ("tabular", "line", "bar")
     valid_timelines = ("weekly", "monthly", "yearly")
@@ -145,6 +146,11 @@ def run_purchases_viewer():
 
         print("\n✅ Sales viewer ran successfully.")
 
+def update_credit_period():
+    vendor_id = int(input("Enter Vendor ID To Be Updated: "))
+    credit_period_days = int(input("Enter Credit Period: "))
+    product_id = int(input("Enter Product ID To Be Updated: "))
+
 def purchases_menu():
     print("\n--- Purchases Menu ---")
     print("1. Record Purchases")
@@ -153,6 +159,7 @@ def purchases_menu():
     print("4. Back to Main Menu")
 
     while True:
+        choice = input("Enter option: ").strip()
         if choice == "1":
             record_purchases()
         elif choice == "2":

@@ -42,7 +42,7 @@ def record_purchases():
         cursor.execute(sql, tuple(purchase.values()))
         conn.commit()
 
-        print("✅ Sale inserted into database.")
+        print("✅ Purchase inserted into database.")
 
         # Backup CSV
         with open("purchases_backup.csv", mode="a", newline="") as f:
@@ -59,13 +59,17 @@ def record_purchases():
         cursor.close()
         conn.close()
 
-# View sales with options for timeline and form of data
+# View purchases with options for timeline and form of data
 def view_purchases(form_of_data="tabular", timeline="monthly"):
     try:
         conn = get_connection()
         cursor = conn.cursor()
 
-        # Fetch purchases linked with vendor
+        #!. Fetch purchases linked with vendors, due dates and due amounts 
+        vendor_name = input("Enter Vendor Name (or part of it) or enter all for all of them: ").strip()
+        due_date = input("Enter Due Date (YYYY-MM-DD) of bills you want to be printed or enter all for all of them: ").strip()
+        due_amount = input("Enter Amount of Bills you want to be printed or for all of them: ").strip()
+
         query = """
             SELECT p.PurchaseID, p.PurchaseDate, p.ProductID, p.Quantity, p.TotalAmount, v.VendorName
             FROM Purchases p
@@ -78,6 +82,8 @@ def view_purchases(form_of_data="tabular", timeline="monthly"):
         if not rows:
             print("⚠ No purchases records found.")
             return None
+
+        
 
         # 2. Load into Pandas for analysis
         df = pd.DataFrame(rows)

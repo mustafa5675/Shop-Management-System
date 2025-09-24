@@ -104,3 +104,12 @@ def get_user_filters():
         'payment_status': payment_status,
         'max_amount': max_amount
     }
+
+def fetch_filtered_data(filters):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    #Fetch data from database based on filters
+    try:
+        sql = "SELECT p.PurchaseID, p.PurchaseDate, v.VendorName, p.Quantity, p.UnitPrice, p.TotalAmount, p.PaymentStatus FROM Purchases p JOIN Vendors v ON p.VendorID = v.VendorID WHERE 1=1"
+        

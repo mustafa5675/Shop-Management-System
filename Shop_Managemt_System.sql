@@ -49,19 +49,15 @@ CREATE TABLE Customers (
 
 CREATE TABLE Purchases (
     PurchaseID INT PRIMARY KEY AUTO_INCREMENT,
-    InvoiceNumber VARCHAR(50) NOT NULL,       -- vendor’s bill/invoice number
     PurchaseDate DATE,
     VendorID INT NOT NULL,
     ProductID INT NOT NULL,
     Quantity INT NOT NULL,
     UnitCost DECIMAL(10,2) NOT NULL,
     TotalAmount DECIMAL(10,2) GENERATED ALWAYS AS (Quantity * UnitCost) STORED,
-
-    -- credit terms
-    CreditPeriodDays INT,                     -- can override vendor’s default
     DueDate DATE,
 
-    IsPaid BOOLEAN DEFAULT FALSE,
+    PaymentStatus ENUM('paid','unpaid') DEFAULT 'unpaid',
     PaymentMethod ENUM('cash','card','online','credit') DEFAULT 'credit',
 
     FOREIGN KEY (VendorID) REFERENCES Vendors(VendorID),
@@ -94,7 +90,7 @@ CREATE TABLE Vendors (
     PhoneNumber DECIMAL(15,0),
     Address VARCHAR(10000),
     City VARCHAR(50),
-    State VARCHAR(50),
+    IndianState VARCHAR(50),
     PostalCode DECIMAL(10,0),
     Country VARCHAR(50),
 	CreditPeriodDays INT   -- vendor’s standard credit terms

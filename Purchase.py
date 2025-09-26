@@ -2,6 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import datetime 
 import csv
+from datetime import timedelta  # Added missing import
 from Database import get_connection
 
 purchase_cache = []  # in-memory backup 
@@ -11,35 +12,49 @@ def record_purchases():
         conn = get_connection()
         cursor = conn.cursor()
 
-        # Input
+        # Input - Fixed undefined variables
+        now = datetime.datetime.now()  # Fixed: defined 'now'
         purchase_date = now.strftime("%Y-%m-%d")
-        quantity = int(input("Enter Quantity Sold: "))
+        
+        # Get additional required inputs
+        vendor_id = int(input("Enter Vendor ID: "))
+        product_id = int(input("Enter Product ID: "))
+        quantity = int(input("Enter Quantity Purchased: "))  # Fixed: Should be "Purchased" not "Sold"
         unit_price = float(input("Enter Unit Price: "))
-        Due_date = purchase_date + timedelta(days = credit_period_days)
+        credit_period_days = int(input("Enter Credit Period Days: "))  # Fixed: Get from user input
+        Due_date = now + timedelta(days=credit_period_days)  # Fixed: Use datetime object
         payment_method = input("Enter Payment Method (cash/card/online): ").strip().lower()
+        payment_status = input("Enter Payment Status (paid/unpaid): ").strip().lower()  # Added missing field
 
         # Validation
         if quantity <= 0 or unit_price <= 0:
             print("❌ Quantity and Unit Price must be positive.")
             return
 
-        # Prepare data
+        # Calculate total amount
+        total_amount = quantity * unit_price
+
+        # Prepare data - Fixed structure
         purchase = {
             "PurchaseDate": purchase_date,
+            "VendorID": vendor_id,
+            "ProductID": product_id,
             "Quantity": quantity,
             "UnitPrice": unit_price,
-            "CreditPeriodDays": update_credit_period(credit_period_days),
-            "DueDate":Due_date,
-            "PaymentMethod": payment_method
+            "TotalAmount": total_amount,
+            "CreditPeriodDays": credit_period_days,
+            "DueDate": Due_date.strftime("%Y-%m-%d"),
+            "PaymentMethod": payment_method,
+            "PaymentStatus": payment_status
         }
         purchase_cache.append(purchase)
 
-        # Insert into DB
+        # Insert into DB - Fixed table name and SQL
         sql = """
-            INSERT INTO Sales (PurchaseDate, ProductID, Quantity, UnitPrice, CreditPeriodDays, PaymentMethod)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO Purchases (PurchaseDate, VendorID, ProductID, Quantity, UnitPrice, TotalAmount, CreditPeriodDays, DueDate, PaymentMethod, PaymentStatus)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        cursor.execute(sql, tuple(purchase.values()))
+        cursor.execute(sql, (purchase_date, vendor_id, product_id, quantity, unit_price, total_amount, credit_period_days, Due_date.strftime("%Y-%m-%d"), payment_method, payment_status))
         conn.commit()
 
         print("✅ Purchase inserted into database.")
@@ -54,10 +69,12 @@ def record_purchases():
         print("💾 Backup written into purchases_backup.csv")
 
     except Exception as e:
-        print("❌ Error recording sale:", e)
+        print("❌ Error recording purchase:", e)
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def get_user_filters():
     """Get filtering criteria from user"""
@@ -105,13 +122,14 @@ def get_user_filters():
         'max_amount': max_amount
     }
 
-def fetch_filtered_data(filters):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    #Fetch data from database based on filters
+def fetch_filtered_purchases(filters):  # Fixed function name
+    """Fetch purchases from database based on filters"""
     try:
-query = """
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Build dynamic query - Fixed indentation and structure
+        query = """
             SELECT p.PurchaseID, p.PurchaseDate, p.VendorID, v.VendorName, p.ProductID, 
                    pr.ProductName, p.Quantity, p.UnitPrice, p.TotalAmount, p.PaymentStatus,
                    p.DueDate, p.PaymentMethod
@@ -164,8 +182,63 @@ query = """
         print("❌ Error fetching purchases:", e)
         return None
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+def group_purchases_into_bills_silent(df, max_amount=None):  # Added missing function
+    """Group purchases by vendor and date to create bills (silent version for interactive mode)"""
+    if df is None or df.empty:
+        return [], pd.DataFrame()
+
+    # Group by VendorName and PurchaseDate
+    grouped = df.groupby(['VendorName', 'PurchaseDate'])
+    
+    bills = []
+    bill_summaries = []
+    bill_number = 1
+    
+    for (vendor_name, purchase_date), group in grouped:
+        # Calculate bill total
+        bill_total = group['TotalAmount'].sum()
+        
+        # Apply amount filter
+        if max_amount is not None and bill_total > max_amount:
+            continue
+        
+        # Create individual bill DataFrame
+        bill_df = group.copy()
+        bill_df = bill_df[['ProductName', 'Quantity', 'UnitPrice', 'TotalAmount', 'PaymentStatus', 'PaymentMethod']]
+        
+        # Store bill
+        bills.append({
+            'bill_number': bill_number,
+            'vendor_name': vendor_name,
+            'purchase_date': purchase_date,
+            'bill_dataframe': bill_df,
+            'bill_total': bill_total,
+            'payment_status': group['PaymentStatus'].iloc[0]
+        })
+        
+        # Add to summary
+        bill_summaries.append({
+            'Bill_Number': bill_number,
+            'Vendor_Name': vendor_name,
+            'Purchase_Date': purchase_date.strftime('%Y-%m-%d'),
+            'Bill_Total': bill_total,
+            'Payment_Status': group['PaymentStatus'].iloc[0].upper()
+        })
+        
+        bill_number += 1
+
+    # Create summary DataFrame
+    if bill_summaries:
+        summary_df = pd.DataFrame(bill_summaries)
+    else:
+        summary_df = pd.DataFrame()
+
+    return bills, summary_df
 
 def group_purchases_into_bills(df, max_amount=None):
     """Group purchases by vendor and date to create bills"""
@@ -269,11 +342,11 @@ def export_bills_to_csv(bills, summary_df):
         bill['bill_dataframe'].to_csv(filename, index=False)
         print(f"💾 Bill #{bill['bill_number']} exported to {filename}")
     
-    # Export summary
+    # Export summary - Fixed missing closing parenthesis
     if not summary_df.empty:
         summary_filename = f"bills_summary_{timestamp}.csv"
         summary_df.to_csv(summary_filename, index=False)
-        print(f"💾 Bills summary exported to {summary_filename}"
+        print(f"💾 Bills summary exported to {summary_filename}")
 
 def display_bills_summary_with_links(bills, summary_df):
     """Display bills summary with interactive links to individual bills"""
@@ -567,7 +640,7 @@ def advanced_purchases_viewer():
     
     # Fetch filtered data
     print("\n📊 Fetching purchase data...")
-    df = fetch_filtered_purchases(filters)
+    df = fetch_filtered_purchases(filters)  # Fixed function name
     
     if df is None:
         return
@@ -619,56 +692,91 @@ def generate_bill_visualizations(summary_df):
     
     print("\nGenerating visualizations...")
     
-    # 1. Bills by Vendor
-    plt.figure(figsize=(12, 6))
-    vendor_totals = summary_df.groupby('Vendor_Name')['Bill_Total'].sum().sort_values(ascending=False)
-    
-    plt.subplot(1, 2, 1)
-    vendor_totals.plot(kind='bar')
-    plt.title('Total Amount by Vendor')
-    plt.xlabel('Vendor')
-    plt.ylabel('Amount (₹)')
-    plt.xticks(rotation=45)
-    plt.grid(True, alpha=0.3)
-    
-    # 2. Payment Status Distribution
-    plt.subplot(1, 2, 2)
-    payment_status = summary_df.groupby('Payment_Status')['Bill_Total'].sum()
-    plt.pie(payment_status.values, labels=payment_status.index, autopct='%1.1f%%')
-    plt.title('Payment Status Distribution')
-    
-    plt.tight_layout()
-    plt.show()
-    
-    # 3. Timeline view
-    summary_df['Purchase_Date'] = pd.to_datetime(summary_df['Purchase_Date'])
-    timeline = summary_df.groupby('Purchase_Date')['Bill_Total'].sum()
-    
-    plt.figure(figsize=(10, 6))
-    timeline.plot(kind='line', marker='o')
-    plt.title('Bills Timeline')
-    plt.xlabel('Date')
-    plt.ylabel('Amount (₹)')
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.show()
+    try:
+        # 1. Bills by Vendor
+        plt.figure(figsize=(12, 6))
+        vendor_totals = summary_df.groupby('Vendor_Name')['Bill_Total'].sum().sort_values(ascending=False)
+        
+        plt.subplot(1, 2, 1)
+        vendor_totals.plot(kind='bar')
+        plt.title('Total Amount by Vendor')
+        plt.xlabel('Vendor')
+        plt.ylabel('Amount (₹)')
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        
+        # 2. Payment Status Distribution
+        plt.subplot(1, 2, 2)
+        payment_status = summary_df.groupby('Payment_Status')['Bill_Total'].sum()
+        plt.pie(payment_status.values, labels=payment_status.index, autopct='%1.1f%%')
+        plt.title('Payment Status Distribution')
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # 3. Timeline view
+        summary_df_copy = summary_df.copy()
+        summary_df_copy['Purchase_Date'] = pd.to_datetime(summary_df_copy['Purchase_Date'])
+        timeline = summary_df_copy.groupby('Purchase_Date')['Bill_Total'].sum()
+        
+        plt.figure(figsize=(10, 6))
+        timeline.plot(kind='line', marker='o')
+        plt.title('Bills Timeline')
+        plt.xlabel('Date')
+        plt.ylabel('Amount (₹)')
+        plt.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.show()
+        
+    except Exception as e:
+        print(f"❌ Error generating visualizations: {e}")
 
 def update_credit_period():
-    vendor_id = int(input("Enter Vendor ID To Be Updated: "))
-    credit_period_days = int(input("Enter Credit Period: "))
-    product_id = int(input("Enter Product ID To Be Updated: "))
-    # Add implementation for updating credit period
+    """Update credit period for vendor-product combination"""
+    try:
+        vendor_id = int(input("Enter Vendor ID To Be Updated: "))
+        credit_period_days = int(input("Enter New Credit Period (days): "))
+        product_id = int(input("Enter Product ID To Be Updated: "))
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Update query (you may need to adjust based on your database schema)
+        sql = """
+            UPDATE Purchases 
+            SET CreditPeriodDays = %s 
+            WHERE VendorID = %s AND ProductID = %s
+        """
+        cursor.execute(sql, (credit_period_days, vendor_id, product_id))
+        conn.commit()
+        
+        if cursor.rowcount > 0:
+            print(f"✅ Credit period updated to {credit_period_days} days for Vendor ID {vendor_id}, Product ID {product_id}")
+        else:
+            print("❌ No records found to update.")
+            
+    except ValueError:
+        print("❌ Please enter valid numeric values.")
+    except Exception as e:
+        print(f"❌ Error updating credit period: {e}")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def purchases_menu():
+    """Main purchases menu with all options"""
     print("\n--- Enhanced Purchases Menu ---")
     print("1. Record Purchases")
     print("2. Advanced Purchases Viewer (with filters & bill grouping)")
     print("3. Update Credit Period")
-    print("4. Back to Main Menu")
+    print("4. Generate Bill Visualizations")
+    print("5. Back to Main Menu")
 
     while True:
-        choice = input("Enter option: ").strip()
+        choice = input("Enter option (1-5): ").strip()
         if choice == "1":
             record_purchases()
         elif choice == "2":
@@ -676,9 +784,19 @@ def purchases_menu():
         elif choice == "3":
             update_credit_period()
         elif choice == "4":
+            # Quick visualization option
+            filters = get_user_filters()
+            df = fetch_filtered_purchases(filters)
+            if df is not None:
+                bills, summary_df = group_purchases_into_bills_silent(df, filters['max_amount'])
+                if not summary_df.empty:
+                    generate_bill_visualizations(summary_df)
+                else:
+                    print("⚠ No data to visualize.")
+        elif choice == "5":
             break
         else:
-            print("❌ Invalid option.")
+            print("❌ Invalid option. Please choose 1-5.")
 
 # For testing purposes
 if __name__ == "__main__":

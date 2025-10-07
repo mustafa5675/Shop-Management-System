@@ -4,6 +4,7 @@ import datetime
 import csv
 from datetime import timedelta  # Added missing import
 from Database import get_connection
+from Products import credit_period_days  # Importing from products.py
 
 purchase_cache = []  # in-memory backup 
 
@@ -21,7 +22,6 @@ def record_purchases():
         product_id = int(input("Enter Product ID: "))
         quantity = int(input("Enter Quantity Purchased: "))  # Fixed: Should be "Purchased" not "Sold"
         unit_price = float(input("Enter Unit Price: "))
-        credit_period_days = int(input("Enter Credit Period Days: "))  # Fixed: Get from user input
         Due_date = now + timedelta(days=credit_period_days)  # Fixed: Use datetime object
         payment_method = input("Enter Payment Method (cash/card/online): ").strip().lower()
         payment_status = input("Enter Payment Status (paid/unpaid): ").strip().lower()  # Added missing field
@@ -42,7 +42,6 @@ def record_purchases():
             "Quantity": quantity,
             "UnitPrice": unit_price,
             "TotalAmount": total_amount,
-            "CreditPeriodDays": credit_period_days,
             "DueDate": Due_date.strftime("%Y-%m-%d"),
             "PaymentMethod": payment_method,
             "PaymentStatus": payment_status
@@ -51,10 +50,10 @@ def record_purchases():
 
         # Insert into DB - Fixed table name and SQL
         sql = """
-            INSERT INTO Purchases (PurchaseDate, VendorID, ProductID, Quantity, UnitPrice, TotalAmount, CreditPeriodDays, DueDate, PaymentMethod, PaymentStatus)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO Purchases (PurchaseDate, VendorID, ProductID, Quantity, UnitCost, TotalAmount, DueDate, PaymentMethod, PaymentStatus)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        cursor.execute(sql, (purchase_date, vendor_id, product_id, quantity, unit_price, total_amount, credit_period_days, Due_date.strftime("%Y-%m-%d"), payment_method, payment_status))
+        cursor.execute(sql, (purchase_date, vendor_id, product_id, quantity, unit_price, total_amount, Due_date.strftime("%Y-%m-%d"), payment_method, payment_status))
         conn.commit()
 
         print("✅ Purchase inserted into database.")
@@ -348,7 +347,7 @@ def export_bills_to_csv(bills, summary_df):
         summary_df.to_csv(summary_filename, index=False)
         print(f"💾 Bills summary exported to {summary_filename}")
 
-def display_bills_summary_with_links(bills, summary_df):
+def display_bills_summary(bills, summary_df):
     """Display bills summary with interactive links to individual bills"""
     if not bills:
         print("⚠ No bills to display.")
@@ -366,8 +365,7 @@ def display_bills_summary_with_links(bills, summary_df):
         status_indicator = "✅" if bill['payment_status'].lower() == 'paid' else "❌"
         print(f"{bill['bill_number']:<6} {bill['vendor_name']:<20} "
               f"{bill['purchase_date'].strftime('%Y-%m-%d'):<12} "
-              f"₹{bill['bill_total']:<11.2f} {status_indicator} {bill['payment_status'].upper():<10} "
-              f"[Click {bill['bill_number']} to view]")
+              f"₹{bill['bill_total']:<11.2f} {status_indicator} {bill['payment_status'].upper():<10} ")
     
     print("-" * 80)
     print(f"Total Bills: {len(bills)} | Grand Total: ₹{summary_df['Bill_Total'].sum():.2f}")
@@ -388,7 +386,7 @@ def interactive_bill_navigator(bills, summary_df):
     
     while True:
         # Display summary with links
-        display_bills_summary_with_links(bills, summary_df)
+        display_bills_summary(bills, summary_df)
         
         print(f"\n🔗 Interactive Bill Navigator")
         print(f"Commands:")
@@ -449,7 +447,7 @@ def display_individual_bill_with_options(selected_bill, all_bills):
     print(f"{'='*70}")
     
     # Navigation options for individual bill
-    while True:
+    while True: 
         print(f"\n🔗 Bill Navigation Options:")
         print(f"  1. Go back to bills summary")
         print(f"  2. View next bill ({selected_bill['bill_number'] + 1 if selected_bill['bill_number'] < len(all_bills) else 'N/A'})")
@@ -484,6 +482,40 @@ def display_individual_bill_with_options(selected_bill, all_bills):
             add_bill_notes(selected_bill)
         else:
             print("❌ Invalid option.")
+
+def export_single_bill(bill):
+    """Export a single bill to CSV"""
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"bill_{bill['bill_number']}_{bill['vendor_name'].replace(' ', '_')}_{timestamp}.csv"
+    bill['bill_dataframe'].to_csv(filename, index=False)
+    print(f"💾 Bill #{bill['bill_number']} exported to {filename}")
+
+def update_bill_payment_status(bill):
+    """Update payment status of a bill"""
+    current_status = bill['payment_status']
+    new_status = 'paid' if current_status.lower() == 'unpaid' else 'unpaid'
+    
+    confirm = input(f"Change payment status from {current_status.upper()} to {new_status.upper()}? (y/n): ").strip().lower()
+    if confirm == 'y':
+        bill['payment_status'] = new_status
+        # Here you would also update the database
+        print(f"✅ Payment status updated to {new_status.upper()}")
+    else:
+        print("❌ Payment status unchanged.")
+
+def add_bill_notes(bill):
+    """Add notes to a bill"""
+    note = input("Enter note for this bill: ").strip()
+    if note:
+        if 'notes' not in bill:
+            bill['notes'] = []
+        bill['notes'].append({
+            'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'note': note
+        })
+        print("✅ Note added to bill.")
+    else:
+        print("❌ No note added.")
 
 def compare_bills(bills):
     """Compare multiple bills side by side"""
@@ -597,40 +629,6 @@ def show_bill_statistics(bills, summary_df):
     for i, (vendor, stats) in enumerate(sorted_vendors[:5], 1):
         print(f"  {i}. {vendor}: {stats['count']} bills, ₹{stats['total']:.2f}")
 
-def export_single_bill(bill):
-    """Export a single bill to CSV"""
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"bill_{bill['bill_number']}_{bill['vendor_name'].replace(' ', '_')}_{timestamp}.csv"
-    bill['bill_dataframe'].to_csv(filename, index=False)
-    print(f"💾 Bill #{bill['bill_number']} exported to {filename}")
-
-def update_bill_payment_status(bill):
-    """Update payment status of a bill"""
-    current_status = bill['payment_status']
-    new_status = 'paid' if current_status.lower() == 'unpaid' else 'unpaid'
-    
-    confirm = input(f"Change payment status from {current_status.upper()} to {new_status.upper()}? (y/n): ").strip().lower()
-    if confirm == 'y':
-        bill['payment_status'] = new_status
-        # Here you would also update the database
-        print(f"✅ Payment status updated to {new_status.upper()}")
-    else:
-        print("❌ Payment status unchanged.")
-
-def add_bill_notes(bill):
-    """Add notes to a bill"""
-    note = input("Enter note for this bill: ").strip()
-    if note:
-        if 'notes' not in bill:
-            bill['notes'] = []
-        bill['notes'].append({
-            'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'note': note
-        })
-        print("✅ Note added to bill.")
-    else:
-        print("❌ No note added.")
-
 def advanced_purchases_viewer():
     """Main function for advanced purchase viewing with filtering and grouping"""
     print("\n🔍 Advanced Purchases Viewer")
@@ -732,48 +730,13 @@ def generate_bill_visualizations(summary_df):
     except Exception as e:
         print(f"❌ Error generating visualizations: {e}")
 
-def update_credit_period():
-    """Update credit period for vendor-product combination"""
-    try:
-        vendor_id = int(input("Enter Vendor ID To Be Updated: "))
-        credit_period_days = int(input("Enter New Credit Period (days): "))
-        product_id = int(input("Enter Product ID To Be Updated: "))
-        
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Update query (you may need to adjust based on your database schema)
-        sql = """
-            UPDATE Purchases 
-            SET CreditPeriodDays = %s 
-            WHERE VendorID = %s AND ProductID = %s
-        """
-        cursor.execute(sql, (credit_period_days, vendor_id, product_id))
-        conn.commit()
-        
-        if cursor.rowcount > 0:
-            print(f"✅ Credit period updated to {credit_period_days} days for Vendor ID {vendor_id}, Product ID {product_id}")
-        else:
-            print("❌ No records found to update.")
-            
-    except ValueError:
-        print("❌ Please enter valid numeric values.")
-    except Exception as e:
-        print(f"❌ Error updating credit period: {e}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-def purchases_menu():
+def purchase_menu():
     """Main purchases menu with all options"""
     print("\n--- Enhanced Purchases Menu ---")
     print("1. Record Purchases")
     print("2. Advanced Purchases Viewer (with filters & bill grouping)")
-    print("3. Update Credit Period")
-    print("4. Generate Bill Visualizations")
-    print("5. Back to Main Menu")
+    print("3. Generate Bill Visualizations")
+    print("4. Back to Main Menu")
 
     while True:
         choice = input("Enter option (1-5): ").strip()
@@ -782,8 +745,6 @@ def purchases_menu():
         elif choice == "2":
             advanced_purchases_viewer()
         elif choice == "3":
-            update_credit_period()
-        elif choice == "4":
             # Quick visualization option
             filters = get_user_filters()
             df = fetch_filtered_purchases(filters)
@@ -793,11 +754,7 @@ def purchases_menu():
                     generate_bill_visualizations(summary_df)
                 else:
                     print("⚠ No data to visualize.")
-        elif choice == "5":
+        elif choice == "4":
             break
         else:
-            print("❌ Invalid option. Please choose 1-5.")
-
-# For testing purposes
-if __name__ == "__main__":
-    purchases_menu()
+            print("❌ Invalid option. Please choose 1-4.")

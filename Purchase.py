@@ -50,10 +50,10 @@ def record_purchases():
 
         # Insert into DB - Fixed table name and SQL
         sql = """
-            INSERT INTO Purchases (PurchaseDate, VendorID, ProductID, Quantity, UnitCost, TotalAmount, DueDate, PaymentMethod, PaymentStatus)
+            INSERT INTO Purchases (PurchaseDate, VendorID, ProductID, Quantity, UnitPrice, TotalAmount, DueDate, PaymentMethod, PaymentStatus)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        cursor.execute(sql, (purchase_date, vendor_id, product_id, quantity, unit_price, total_amount, Due_date.strftime("%Y-%m-%d"), payment_method, payment_status))
+        cursor.execute(sql, (purchase_date, vendor_id, product_id, quantity, unit_price, total_amount, Due_date, payment_method, payment_status))
         conn.commit()
 
         print("✅ Purchase inserted into database.")
@@ -758,3 +758,6 @@ def purchase_menu():
             break
         else:
             print("❌ Invalid option. Please choose 1-4.")
+
+if __name__ == "__main__":
+    purchase_menu()

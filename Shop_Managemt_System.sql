@@ -20,8 +20,7 @@ CREATE TABLE SalesReturn (
     SaleID INT NOT NULL,
     CustomerID INT NOT NULL,
     ProductID INT NOT NULL,
-    EmployeeID INT,
-    ReturnDate DATE DEFAULT CURRENT_TIMESTAMP,
+    ReturnDate,
     QuantityReturned INT NOT NULL,
     RefundAmount DECIMAL(10,2) NOT NULL,
     Reason VARCHAR(255),
@@ -53,7 +52,7 @@ CREATE TABLE Purchases (
     VendorID INT NOT NULL,
     ProductID INT NOT NULL,
     Quantity INT NOT NULL,
-    UnitCost DECIMAL(10,2) NOT NULL,
+    UnitPrice DECIMAL(10,2) NOT NULL,
     TotalAmount DECIMAL(10,2) GENERATED ALWAYS AS (Quantity * UnitCost) STORED,
     DueDate DATE,
 
@@ -84,8 +83,7 @@ CREATE TABLE PurchaseReturn (
 
 CREATE TABLE Vendors (
     VendorID INT PRIMARY KEY AUTO_INCREMENT,
-    FirstName VARCHAR(50) NOT NULL,
-    LastName VARCHAR(50),
+    VenodName VARCHAR (100) NOT NULL,
     Email VARCHAR(100) UNIQUE,
     PhoneNumber DECIMAL(15,0),
     Address VARCHAR(10000),
@@ -174,3 +172,5 @@ CREATE TABLE Inventory (
 
 CREATE TABLE Products (ProductID INT PRIMARY KEY AUTO_INCREMENT,
     ProductName VARCHAR(50));
+
+desc table purchases;

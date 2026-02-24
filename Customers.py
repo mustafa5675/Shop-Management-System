@@ -1,27 +1,30 @@
 import csv
+from datetime import datetime
 from Database import get_connection
 import pandas as pd
 
 customer_cache = [] # in-memory backup
 
 def add_customer():
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
 
         # Input
-        first_name = input("Enter First Name: ").strip()
-        last_name = input("Enter Last Name (optional): ").strip() or None
+        customer_name = input("Enter Customer Name: ").strip().capitalize()
         email = input("Enter Email: ").strip()
-        phone = input("Enter Phone Number: ").strip()
-        address = input("Enter Address: ").strip()
-        city = input("Enter City: ").strip()
-        state = input("Enter State: ").strip()
-        postal_code = input("Enter Postal Code: ").strip()
-        country = input("Enter Country: ").strip()
+        phone = int(input("Enter Phone Number: "))
+        address = input("Enter Address: ").strip().capitalize()
+        city = input("Enter City: ").strip().capitalize()
+        state = input("Enter State: ").strip().capitalize()
+        postal_code = int(input("Enter Postal Code: "))
+        country = input("Enter Country: ").strip().capitalize()
+        registration_date = datetime.now()
 
        # Quick validations
-        if not first_name:
+        if not customer_name:
             print("❌ First name is required.")
             return
         if "@" not in email:
@@ -29,14 +32,13 @@ def add_customer():
             return 
 
         customer = {
-            "FirstName": first_name,
-            "LastName": last_name,
+            "Customer_Name": customer_name,
             "Email": email,
-            "PhoneNumber": phone,
+            "Phone_No": phone,
             "Address": address,
             "City": city,
             "State": state,
-            "PostalCode": postal_code,
+            "Postal_Code": postal_code,
             "Country": country,
         }
         customer_cache.append(customer)
@@ -44,8 +46,8 @@ def add_customer():
         # Insert into DB
         sql = """
             INSERT INTO Customers
-            (FirstName, LastName, Email, PhoneNumber, Address, City, State, PostalCode, Country)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (Customer_Name, Email, Phone_No, Address, City, State, Postal_Code, Country)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
         cursor.execute(sql, tuple(customer.values()))
         conn.commit()
@@ -62,12 +64,16 @@ def add_customer():
         print("💾 Backup written into customers_backup.csv")
 
     except Exception as e:
-        print("❌ Error adding customer:", e)
+        print("Error adding customer:", e)
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def view_customers():
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -84,13 +90,17 @@ def view_customers():
         return df
 
     except Exception as e:
-        print("❌ Error viewing customers:", e)
+        print("âŒ Error viewing customers:", e)
         return None
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def search_customer(keyword):
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -112,13 +122,17 @@ def search_customer(keyword):
         return df
 
     except Exception as e:
-        print("❌ Error searching customers:", e)
+        print("âŒ Error searching customers:", e)
         return None
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def delete_customer(customer_id):
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -135,17 +149,21 @@ def delete_customer(customer_id):
         print("✅ Customer deleted successfully.")
 
     except Exception as e:
-        print("❌ Error deleting customer:", e)
+        print("âŒ Error deleting customer:", e)
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def update_customer(customer_id):
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
 
-        new_email = input("Enter new Email (leave blank to keep): ").strip()
+        new_email = input("Enter new Email (leave blank to keep): ").strip().capitalize()
         new_phone = input("Enter new Phone (leave blank to keep): ").strip()
         new_address = input("Enter new Address (leave blank to keep): ").strip()
 
@@ -174,12 +192,16 @@ def update_customer(customer_id):
         print("✅ Customer updated successfully.")
 
     except Exception as e:
-        print("❌ Error updating customer:", e)
+        print("âŒ Error updating customer:", e)
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def customer_insights(customer_id):
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -204,10 +226,12 @@ def customer_insights(customer_id):
         print(f"Last Purchase Date: {last_purchase or 'N/A'}")
 
     except Exception as e:
-        print("❌ Error fetching customer insights:", e)
+        print("âŒ Error fetching customer insights:", e)
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def customers_menu():
     print("\n--- Customer Menu ---")
@@ -239,3 +263,7 @@ def customers_menu():
         else:
 
             print("❌ Invalid option.")
+
+if __name__ == "__main__":
+    customers_menu()
+

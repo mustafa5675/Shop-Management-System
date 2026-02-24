@@ -7,6 +7,8 @@ import datetime
 sales_return_cache = []  # in-memory backup
 
 def record_sales_return():
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -56,15 +58,19 @@ def record_sales_return():
         print("💾 Backup written into sales_return_backup.csv")
 
     except Exception as e:
-        print("❌ Error recording sales return:", e)
+        print("âŒ Error recording sales return:", e)
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 import pandas as pd
 import matplotlib.pyplot as plt
 
 def view_sales_return(form_of_data="tabular", timeline="monthly"):
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -114,11 +120,13 @@ def view_sales_return(form_of_data="tabular", timeline="monthly"):
             return None
 
     except Exception as e:
-        print("❌ Error viewing sales returns:", e)
+        print("âŒ Error viewing sales returns:", e)
         return None
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 
 def run_sales_return_viewer():

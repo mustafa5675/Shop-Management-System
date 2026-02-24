@@ -1,1 +1,0 @@
-credit_period_days = 30

@@ -5,6 +5,5 @@ def get_connection():
         host="localhost",
         user="root",
         password="hello",   
-        database="Shop_Management",
-        cursorclass=pymysql.cursors.DictCursor  # return dict rows
+        database="Shop_Management"
     )

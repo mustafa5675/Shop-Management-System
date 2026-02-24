@@ -1,8 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-import datetime 
 import csv
-from datetime import timedelta  # Added missing import
+from datetime import datetime, date, timedelta  # Added missing import
 from Database import get_connection
 from Products import credit_period_days  # Importing from products.py
 
@@ -14,25 +13,32 @@ def record_purchases():
         cursor = conn.cursor()
 
         # Input - Fixed undefined variables
-        now = datetime.datetime.now()  # Fixed: defined 'now'
-        purchase_date = now.strftime("%Y-%m-%d")
-        
+        now = date.today()
+
         # Get additional required inputs
-        vendor_id = int(input("Enter Vendor ID: "))
-        product_id = int(input("Enter Product ID: "))
+        vendor_name = int(input("Enter Vendor ID: "))
+        product_name = int(input("Enter Product ID: "))
+        purchase_date = now
         quantity = int(input("Enter Quantity Purchased: "))  # Fixed: Should be "Purchased" not "Sold"
-        unit_price = float(input("Enter Unit Price: "))
+        unit_cost = float(input("Enter Unit Price: "))
         Due_date = now + timedelta(days=credit_period_days)  # Fixed: Use datetime object
-        payment_method = input("Enter Payment Method (cash/card/online): ").strip().lower()
+        payment_method = input("Enter Payment Method (cash/card/netbanking/credit): ").strip().lower()
         payment_status = input("Enter Payment Status (paid/unpaid): ").strip().lower()  # Added missing field
 
         # Validation
-        if quantity <= 0 or unit_price <= 0:
+        if quantity <= 0 or unit_cost <= 0:
             print("❌ Quantity and Unit Price must be positive.")
             return
 
         # Calculate total amount
-        total_amount = quantity * unit_price
+        total_amount = quantity * unit_cost
+
+        #Finding vendor and product IDs IDs using their names
+        vendor_id = cursor.execute('SELECT Vendors_ID FROM Vendors Where Vendors_Name LIKE %s',(f"%{vendor_name}%"))
+        result = cursor.fetchall()
+        product_id = cursor.execute('SELECT Products_ID FROM Products WHERE Products_Name LIKE %s',(f"%{product_name}%"))
+        result = cursor.fetchall()
+
 
         # Prepare data - Fixed structure
         purchase = {
@@ -40,9 +46,9 @@ def record_purchases():
             "VendorID": vendor_id,
             "ProductID": product_id,
             "Quantity": quantity,
-            "UnitPrice": unit_price,
+            "UnitCost": unit_cost,
             "TotalAmount": total_amount,
-            "DueDate": Due_date.strftime("%Y-%m-%d"),
+            "DueDate": Due_date,
             "PaymentMethod": payment_method,
             "PaymentStatus": payment_status
         }
@@ -50,10 +56,11 @@ def record_purchases():
 
         # Insert into DB - Fixed table name and SQL
         sql = """
-            INSERT INTO Purchases (PurchaseDate, VendorID, ProductID, Quantity, UnitPrice, TotalAmount, DueDate, PaymentMethod, PaymentStatus)
+            INSERT INTO Purchases (Vendors_ID, Products_ID, Purchase_Date, Quan_Purchased, Unit_Cost, Total, Due_Date, Payment_Method, Payment_Status)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        cursor.execute(sql, (purchase_date, vendor_id, product_id, quantity, unit_price, total_amount, Due_date, payment_method, payment_status))
+        # Ensure DueDate is passed as a DATE-compatible string
+        cursor.execute(sql, (purchase_date, vendor_id, product_id, quantity, unit_cost, total_amount, Due_date, payment_method, payment_status))
         conn.commit()
 
         print("✅ Purchase inserted into database.")
@@ -70,10 +77,7 @@ def record_purchases():
     except Exception as e:
         print("❌ Error recording purchase:", e)
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        cursor.commit()
 
 def get_user_filters():
     """Get filtering criteria from user"""
@@ -129,9 +133,18 @@ def fetch_filtered_purchases(filters):  # Fixed function name
 
         # Build dynamic query - Fixed indentation and structure
         query = """
-            SELECT p.PurchaseID, p.PurchaseDate, p.VendorID, v.VendorName, p.ProductID, 
-                   pr.ProductName, p.Quantity, p.UnitPrice, p.TotalAmount, p.PaymentStatus,
-                   p.DueDate, p.PaymentMethod
+            SELECT p.PurchaseID,
+                   p.PurchaseDate,
+                   p.VendorID,
+                   CONCAT(v.FirstName, ' ', COALESCE(v.LastName, '')) AS VendorName,
+                   p.ProductID,
+                   pr.ProductName,
+                   p.Quantity,
+                   p.UnitCost,
+                   p.TotalAmount,
+                   p.PaymentStatus,
+                   p.DueDate,
+                   p.PaymentMethod
             FROM Purchases p
             JOIN Vendors v ON p.VendorID = v.VendorID
             JOIN Products pr ON p.ProductID = pr.ProductID
@@ -169,7 +182,7 @@ def fetch_filtered_purchases(filters):  # Fixed function name
 
         # Convert to DataFrame
         columns = ['PurchaseID', 'PurchaseDate', 'VendorID', 'VendorName', 'ProductID', 
-                  'ProductName', 'Quantity', 'UnitPrice', 'TotalAmount', 'PaymentStatus',
+                  'ProductName', 'Quantity', 'UnitCost', 'TotalAmount', 'PaymentStatus',
                   'DueDate', 'PaymentMethod']
         
         df = pd.DataFrame(rows, columns=columns)
@@ -758,6 +771,6 @@ def purchase_menu():
             break
         else:
             print("❌ Invalid option. Please choose 1-4.")
-
+            
 if __name__ == "__main__":
     purchase_menu()

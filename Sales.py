@@ -6,14 +6,16 @@ import csv
 from Database import get_connection
 
 sales_cache = []  # in-memory backup
-now = datetime.now()
 
 def record_sales():
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
 
         # Input
+        now = datetime.now()
         sale_date = now.strftime("%Y-%m-%d")
         product_id = int(input("Enter Product ID: "))
         quantity = int(input("Enter Quantity Sold: "))
@@ -55,13 +57,17 @@ def record_sales():
         print("💾 Backup written into sales_backup.csv")
 
     except Exception as e:
-        print("❌ Error recording sale:", e)
+        print("âŒ Error recording sale:", e)
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 # View sales with options for timeline and form of data
 def view_sales(form_of_data="tabular", timeline="monthly"):
+    conn = None
+    cursor = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -113,11 +119,13 @@ def view_sales(form_of_data="tabular", timeline="monthly"):
             return None
 
     except Exception as e:
-        print("❌ Error fetching sales:", e)
+        print("âŒ Error fetching sales:", e)
         return None
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 
 def run_sales_viewer():

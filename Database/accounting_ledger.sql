@@ -261,6 +261,36 @@ CREATE TABLE IF NOT EXISTS `sub_ledger_ar` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 COMMENT='Customer-level receivables detail — sub-ledger to account 1200';
 
+-- FIX (Issue 2): Trigger to auto-settle AR entries when balance reaches zero.
+-- After every insert into sub_ledger_ar, recalculate the net balance for the
+-- same customer+reference and flip is_settled=TRUE on all matching rows.
+DELIMITER $$
+DROP TRIGGER IF EXISTS trg_settle_ar $$
+CREATE TRIGGER trg_settle_ar
+AFTER INSERT ON sub_ledger_ar
+FOR EACH ROW
+BEGIN
+    DECLARE v_net_balance DECIMAL(15,2);
+
+    -- Net balance: positive = still owed, zero/negative = fully settled
+    SELECT COALESCE(SUM(debit_amount) - SUM(credit_amount), 0)
+    INTO   v_net_balance
+    FROM   sub_ledger_ar
+    WHERE  customer_id    = NEW.customer_id
+      AND  reference_id   = NEW.reference_id
+      AND  reference_type = NEW.reference_type;
+
+    IF v_net_balance <= 0 THEN
+        UPDATE sub_ledger_ar
+        SET    is_settled = TRUE
+        WHERE  customer_id    = NEW.customer_id
+          AND  reference_id   = NEW.reference_id
+          AND  reference_type = NEW.reference_type
+          AND  is_settled     = FALSE;
+    END IF;
+END $$
+DELIMITER ;
+
 -- ----------------------------------------------------------------------------
 -- 6.2  Sub-Ledger AP  — per-vendor payable tracking
 -- ----------------------------------------------------------------------------
@@ -285,6 +315,36 @@ CREATE TABLE IF NOT EXISTS `sub_ledger_ap` (
     INDEX idx_ap_txn_date  (txn_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 COMMENT='Vendor-level payables detail — sub-ledger to account 2000';
+
+-- FIX (Issue 2): Trigger to auto-settle AP entries when balance reaches zero.
+-- After every insert into sub_ledger_ap, recalculate the net balance for the
+-- same vendor+reference and flip is_settled=TRUE on all matching rows.
+DELIMITER $$
+DROP TRIGGER IF EXISTS trg_settle_ap $$
+CREATE TRIGGER trg_settle_ap
+AFTER INSERT ON sub_ledger_ap
+FOR EACH ROW
+BEGIN
+    DECLARE v_net_balance DECIMAL(15,2);
+
+    -- Net balance: positive = still owed, zero/negative = fully settled
+    SELECT COALESCE(SUM(credit_amount) - SUM(debit_amount), 0)
+    INTO   v_net_balance
+    FROM   sub_ledger_ap
+    WHERE  vendor_id      = NEW.vendor_id
+      AND  reference_id   = NEW.reference_id
+      AND  reference_type = NEW.reference_type;
+
+    IF v_net_balance <= 0 THEN
+        UPDATE sub_ledger_ap
+        SET    is_settled = TRUE
+        WHERE  vendor_id      = NEW.vendor_id
+          AND  reference_id   = NEW.reference_id
+          AND  reference_type = NEW.reference_type
+          AND  is_settled     = FALSE;
+    END IF;
+END $$
+DELIMITER ;
 
 
 -- ============================================================================
@@ -489,8 +549,11 @@ BEGIN
     SET v_inventory_acct = get_account_id_by_code('1300');
     SET v_discount_acct  = get_account_id_by_code('4200');
 
-    -- Net revenue = total collected - GST
-    SET v_net_revenue = p_total_amount - p_gst_amount;
+    -- FIX (Issue 6): v_net_revenue is the GROSS revenue before discount.
+    -- The debit (Cash/AR) is already the net amount the customer actually paid.
+    -- Discount is then recorded as a separate DR to Discounts Allowed (4200),
+    -- so revenue and discount are both gross — no double-reduction of Cash/AR.
+    SET v_net_revenue = p_total_amount - p_gst_amount + p_discount_amount;
 
     -- Determine debit account based on payment method
     IF p_payment_method = 'credit' THEN
@@ -501,12 +564,19 @@ BEGIN
         SET v_debit_acct = v_cash_acct;  -- default cash
     END IF;
 
-    -- Resolve active period
+    -- FIX (Issue 3): Reject the transaction if no OPEN period covers this date.
+    -- Without this guard, v_period_id would be NULL and the entry would bypass
+    -- period locking — silently undermining the closed-period audit trail.
     SELECT period_id INTO v_period_id
     FROM accounting_periods
     WHERE status = 'OPEN'
       AND p_sale_date BETWEEN start_date AND end_date
     LIMIT 1;
+
+    IF v_period_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot post sale: no OPEN accounting period found for this date. Open a period first.';
+    END IF;
 
     START TRANSACTION;
 
@@ -518,13 +588,13 @@ BEGIN
          CONCAT('Sale #', p_sale_id, ' — ', p_payment_method), p_posted_by);
     SET v_txn_id = LAST_INSERT_ID();
 
-    -- LINE 1: DR Cash/Bank/AR  (total collected)
+    -- LINE 1: DR Cash/Bank/AR  (net collected = total after discount)
     INSERT INTO transaction_lines (transaction_id, account_id, entry_type, amount, description)
-    VALUES (v_txn_id, v_debit_acct, 'DEBIT', p_total_amount, 'Amount received/receivable');
+    VALUES (v_txn_id, v_debit_acct, 'DEBIT', p_total_amount, 'Amount received/receivable (net of discount)');
 
-    -- LINE 2: CR Sales Revenue  (net of GST)
+    -- LINE 2: CR Sales Revenue  (gross revenue before discount, net of GST)
     INSERT INTO transaction_lines (transaction_id, account_id, entry_type, amount, description)
-    VALUES (v_txn_id, v_revenue_acct, 'CREDIT', v_net_revenue, 'Sales revenue net of GST');
+    VALUES (v_txn_id, v_revenue_acct, 'CREDIT', v_net_revenue, 'Gross sales revenue net of GST');
 
     -- LINE 3: CR GST Payable  (only if GST > 0)
     IF p_gst_amount > 0 THEN
@@ -542,13 +612,15 @@ BEGIN
         VALUES (v_txn_id, v_inventory_acct, 'CREDIT', p_cogs_amount, 'Inventory reduction on sale');
     END IF;
 
-    -- LINE 6 & 7: Discount if applicable
+    -- FIX (Issue 6): Discount entry is ONLY a debit to Discounts Allowed (4200).
+    -- The matching credit is Revenue (4000) being recorded at gross, not Cash again.
+    -- Entry: DR Discounts Allowed / CR Sales Revenue (net_revenue already includes discount)
     IF p_discount_amount > 0 THEN
         INSERT INTO transaction_lines (transaction_id, account_id, entry_type, amount, description)
-        VALUES (v_txn_id, v_discount_acct, 'DEBIT', p_discount_amount, 'Discount allowed to customer');
+        VALUES (v_txn_id, v_discount_acct, 'DEBIT', p_discount_amount, 'Discount allowed to customer (contra-revenue)');
 
-        INSERT INTO transaction_lines (transaction_id, account_id, entry_type, amount, description)
-        VALUES (v_txn_id, v_debit_acct, 'CREDIT', p_discount_amount, 'Discount offset against receivable/cash');
+        -- The balancing credit is embedded in v_net_revenue above (gross = net + discount).
+        -- No additional credit entry needed — removing the old double-credit line here.
     END IF;
 
     -- Populate AR sub-ledger for credit sales
@@ -615,9 +687,15 @@ BEGIN
         SET v_credit_acct = v_cash_acct;
     END IF;
 
+    -- FIX (Issue 3): Guard against missing/closed accounting period.
     SELECT period_id INTO v_period_id
     FROM accounting_periods
     WHERE status='OPEN' AND p_return_date BETWEEN start_date AND end_date LIMIT 1;
+
+    IF v_period_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot post sale return: no OPEN accounting period found for this date.';
+    END IF;
 
     START TRANSACTION;
 
@@ -714,9 +792,15 @@ BEGIN
         SET v_credit_acct = v_cash_acct;
     END IF;
 
+    -- FIX (Issue 3): Guard against missing/closed accounting period.
     SELECT period_id INTO v_period_id
     FROM accounting_periods
     WHERE status='OPEN' AND p_purchase_date BETWEEN start_date AND end_date LIMIT 1;
+
+    IF v_period_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot post purchase: no OPEN accounting period found for this date.';
+    END IF;
 
     START TRANSACTION;
 
@@ -802,9 +886,15 @@ BEGIN
         SET v_debit_acct = v_cash_acct;
     END IF;
 
+    -- FIX (Issue 3): Guard against missing/closed accounting period.
     SELECT period_id INTO v_period_id
     FROM accounting_periods
     WHERE status='OPEN' AND p_return_date BETWEEN start_date AND end_date LIMIT 1;
+
+    IF v_period_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot post purchase return: no OPEN accounting period found for this date.';
+    END IF;
 
     START TRANSACTION;
 
@@ -892,9 +982,15 @@ BEGIN
         SET v_credit_acct = v_cash_acct;
     END IF;
 
+    -- FIX (Issue 3): Guard against missing/closed accounting period.
     SELECT period_id INTO v_period_id
     FROM accounting_periods
     WHERE status='OPEN' AND p_expense_date BETWEEN start_date AND end_date LIMIT 1;
+
+    IF v_period_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot post expense: no OPEN accounting period found for this date.';
+    END IF;
 
     START TRANSACTION;
 
@@ -959,6 +1055,12 @@ BEGIN
     SELECT period_id INTO v_period_id
     FROM accounting_periods
     WHERE status='OPEN' AND p_payment_date BETWEEN start_date AND end_date LIMIT 1;
+
+    -- FIX (Issue 3): Guard against missing/closed accounting period.
+    IF v_period_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot post payroll: no OPEN accounting period found for this date.';
+    END IF;
 
     START TRANSACTION;
 
@@ -1034,9 +1136,15 @@ BEGIN
 
     SET v_debit_acct = IF(p_payment_mode IN ('bank','upi','card'), v_bank_acct, v_cash_acct);
 
+    -- FIX (Issue 3): Guard against missing/closed accounting period.
     SELECT period_id INTO v_period_id
     FROM accounting_periods
     WHERE status='OPEN' AND p_txn_date BETWEEN start_date AND end_date LIMIT 1;
+
+    IF v_period_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot post capital injection: no OPEN accounting period found for this date.';
+    END IF;
 
     START TRANSACTION;
 

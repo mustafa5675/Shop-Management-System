@@ -1,776 +1,460 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import csv
-from datetime import datetime, date, timedelta  # Added missing import
-from Database import get_connection
-from Products import credit_period_days  # Importing from products.py
+from datetime   import datetime, date
+from Database   import get_connection
+from Session    import Session
+from AuditLogger import log_audit, BatchLedger
+from Utils      import backup_to_csv, display_table, confirm, safe_int, safe_float, safe_date
 
-purchase_cache = []  # in-memory backup 
+"""
+Operations
+----------
+record_purchase()        New lot creation · AP sub-ledger (credit) ·
+                         Expense_Ledger insert · BatchLedger enqueue · audit
+view_purchases()         Paginated + date/vendor/product/status filters
+search_purchases()       Multi-filter including invoice number and amount range
+update_purchase()        Soft-update (invoice_no, payment_status only post-commit)
+soft_delete_purchase()   Deducts added lot, marks deleted
+purchase_insights()      Vendor-wise spend, COGS ratio, overdue AP
+"""
 
-def record_purchases():
+def record_purchase():
+    user = Session.require()
+    conn = cursor = None
     try:
-        conn = get_connection()
+        conn   = get_connection()
         cursor = conn.cursor()
 
-        # Input - Fixed undefined variables
-        now = date.today()
+        vendor_id = safe_int("Vendor ID            : ")
+        if not vendor_id: return
+        cursor.execute(
+            "SELECT * FROM Vendors WHERE vendor_id=%s AND is_deleted=FALSE", (vendor_id,)
+        )
+        vendor = cursor.fetchone()
+        if not vendor:
+            print("❌ Vendor not found."); return
 
-        # Get additional required inputs
-        vendor_name = int(input("Enter Vendor ID: "))
-        product_name = int(input("Enter Product ID: "))
-        purchase_date = now
-        quantity = int(input("Enter Quantity Purchased: "))  # Fixed: Should be "Purchased" not "Sold"
-        unit_cost = float(input("Enter Unit Price: "))
-        Due_date = now + timedelta(days=credit_period_days)  # Fixed: Use datetime object
-        payment_method = input("Enter Payment Method (cash/card/netbanking/credit): ").strip().lower()
-        payment_status = input("Enter Payment Status (paid/unpaid): ").strip().lower()  # Added missing field
+        product_id = safe_int("Product ID           : ")
+        if not product_id: return
+        cursor.execute(
+            "SELECT * FROM Products WHERE product_id=%s AND is_deleted=FALSE", (product_id,)
+        )
+        product = cursor.fetchone()
+        if not product:
+            print("❌ Product not found."); return
 
-        # Validation
-        if quantity <= 0 or unit_cost <= 0:
-            print("❌ Quantity and Unit Price must be positive.")
-            return
+        qty        = safe_int("Qty Purchased        : ")
+        unit_cost  = safe_float("Unit Cost (₹)        : ")
+        freight    = safe_float("Freight / Shipping   : ") or 0.0
+        gst_pct    = safe_float(f"GST % [{product['gst_percent']}]: ",
+                                allow_blank=True) or float(product["gst_percent"])
+        payment_m  = input("Payment (cash/card/upi/net_banking/credit): ").strip().lower()
+        invoice_no = input("Vendor Invoice No.   : ").strip() or None
+        exp_date   = safe_date("Expiry Date [blank]  : ", allow_blank=True)
+        batch_no   = input("Batch No. [blank]    : ").strip() or None
 
-        # Calculate total amount
-        total_amount = quantity * unit_cost
+        if not qty or qty <= 0 or not unit_cost or unit_cost <= 0:
+            print("❌ Quantity and unit cost must be positive."); return
 
-        #Finding vendor and product IDs IDs using their names
-        vendor_id = cursor.execute('SELECT Vendors_ID FROM Vendors Where Vendors_Name LIKE %s',(f"%{vendor_name}%"))
-        result = cursor.fetchall()
-        product_id = cursor.execute('SELECT Products_ID FROM Products WHERE Products_Name LIKE %s',(f"%{product_name}%"))
-        result = cursor.fetchall()
+        total_before_gst = (unit_cost * qty) + freight
+        gst_amount       = round(total_before_gst * gst_pct / 100, 2)
+        total            = round(total_before_gst + gst_amount, 2)
+        purchase_date    = date.today()
 
+        from datetime import timedelta
+        due_date = purchase_date + timedelta(days=vendor["credit_period_days"])
 
-        # Prepare data - Fixed structure
-        purchase = {
-            "PurchaseDate": purchase_date,
-            "VendorID": vendor_id,
-            "ProductID": product_id,
-            "Quantity": quantity,
-            "UnitCost": unit_cost,
-            "TotalAmount": total_amount,
-            "DueDate": Due_date,
-            "PaymentMethod": payment_method,
-            "PaymentStatus": payment_status
-        }
-        purchase_cache.append(purchase)
+        print(f"""
+  ─── Purchase Summary ───────────────────
+  Vendor   : {vendor['vendor_name']}
+  Product  : {product['product_name']}
+  Qty      : {qty}  @ ₹{unit_cost:,.2f}
+  Freight  : ₹{freight:,.2f}
+  GST      : ₹{gst_amount:,.2f}  ({gst_pct}%)
+  TOTAL    : ₹{total:,.2f}
+  Due Date : {due_date}
+  Payment  : {payment_m.upper()}
+  ─────────────────────────────────────────""")
+        if not confirm("Confirm purchase? (y/n): "):
+            print("Cancelled."); return
 
-        # Insert into DB - Fixed table name and SQL
-        sql = """
-            INSERT INTO Purchases (Vendors_ID, Products_ID, Purchase_Date, Quan_Purchased, Unit_Cost, Total, Due_Date, Payment_Method, Payment_Status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        # Ensure DueDate is passed as a DATE-compatible string
-        cursor.execute(sql, (purchase_date, vendor_id, product_id, quantity, unit_cost, total_amount, Due_date, payment_method, payment_status))
+        conn.begin()
+
+        # 1. Insert purchase record
+        cursor.execute(
+            """INSERT INTO Purchases
+               (vendor_id, product_id, purchase_date, qty_purchased,
+                unit_cost, freight_cost, total, due_date,
+                payment_method, payment_status, invoice_no, created_by)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (vendor_id, product_id, purchase_date, qty,
+             unit_cost, freight, total, due_date,
+             payment_m,
+             "paid" if payment_m != "credit" else "pending",
+             invoice_no, user["user_id"])
+        )
+        purchase_id = cursor.lastrowid
+
+        # 2. Create inventory lot
+        landed_cost_per_unit = round((total_before_gst) / qty, 4)
+        cursor.execute(
+            """INSERT INTO Inventory_Lots
+               (product_id, purchase_id, quantity, cost_price,
+                exp_date, batch_no)
+               VALUES(%s,%s,%s,%s,%s,%s)""",
+            (product_id, purchase_id, qty,
+             landed_cost_per_unit, exp_date, batch_no)
+        )
+        lot_id = cursor.lastrowid
+
+        # 3. Movement log
+        cursor.execute(
+            """SELECT COALESCE(SUM(quantity),0) AS qty
+               FROM Inventory_Lots WHERE product_id=%s AND is_deleted=FALSE AND lot_id!=%s""",
+            (product_id, lot_id)
+        )
+        before_qty = cursor.fetchone()["qty"]
+        cursor.execute(
+            """INSERT INTO Inventory_Movements
+               (product_id, lot_id, movement_type, reference_type, reference_id,
+                qty_before, qty_change, qty_after, reason, performed_by)
+               VALUES(%s,%s,'purchase_in','PURCHASE',%s,%s,%s,%s,%s,%s)""",
+            (product_id, lot_id, purchase_id,
+             before_qty, qty, before_qty + qty,
+             f"Purchase #{purchase_id} from {vendor['vendor_name']}", user["user_id"])
+        )
+
+        # 4. Expense Ledger
+        cursor.execute(
+            "SELECT category_id FROM Expense_Categories WHERE category_name='miscellaneous' LIMIT 1"
+        )
+        cat_row = cursor.fetchone()
+        cat_id  = cat_row["category_id"] if cat_row else None
+        cursor.execute(
+            """CALL record_expense_ledger(%s,'cost_of_goods',%s,'PURCHASE',%s,
+               %s,%s,%s,%s,NULL,%s,%s, @el_id)""",
+            (purchase_date, cat_id, purchase_id,
+             total_before_gst, gst_amount, payment_m,
+             vendor_id,
+             f"Purchase #{purchase_id} — {product['product_name']}",
+             user["user_id"])
+        )
+
+        # 5. AP sub-ledger for credit purchases
+        if payment_m == "credit":
+            cursor.execute(
+                """INSERT INTO sub_ledger_ap
+                   (transaction_id, vendor_id, reference_type, reference_id,
+                    txn_date, credit_amount, due_date)
+                   VALUES(0,%s,'PURCHASE',%s,%s,%s,%s)""",
+                (vendor_id, purchase_id, purchase_date, total, due_date)
+            )
+
         conn.commit()
 
-        print("✅ Purchase inserted into database.")
+        # 6. Batch ledger
+        BatchLedger.enqueue("post_purchase_to_ledger", (
+            purchase_id, str(purchase_date), total_before_gst,
+            gst_amount, payment_m, vendor_id, str(due_date), user["user_id"]
+        ))
 
-        # Backup CSV
-        with open("purchases_backup.csv", mode="a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=purchase.keys())
-            if f.tell() == 0:
-                writer.writeheader()
-            writer.writerow(purchase)
-
-        print("💾 Backup written into purchases_backup.csv")
+        log_audit("Purchases", purchase_id, "INSERT", new_value={
+            "vendor_id": vendor_id, "product_id": product_id,
+            "qty_purchased": qty, "total": total,
+            "payment_method": payment_m, "created_by": user["username"]
+        })
+        backup_to_csv("backups/purchases_backup.csv", {
+            "purchase_id": purchase_id, "vendor_id": vendor_id,
+            "product_id": product_id, "qty_purchased": qty,
+            "unit_cost": unit_cost, "freight": freight,
+            "gst_amount": gst_amount, "total": total,
+            "payment_method": payment_m, "due_date": due_date,
+            "created_by": user["username"], "backed_up_at": datetime.now()
+        }, ["purchase_id","vendor_id","product_id","qty_purchased",
+            "unit_cost","freight","gst_amount","total",
+            "payment_method","due_date","created_by","backed_up_at"])
+        print(f"\n✅ Purchase #{purchase_id} recorded. Lot #{lot_id} created with {qty} units.")
 
     except Exception as e:
-        print("❌ Error recording purchase:", e)
+        if conn: conn.rollback()
+        print(f"❌ Error: {e}")
     finally:
-        cursor.commit()
+        if cursor: cursor.close()
+        if conn:   conn.close()
 
-def get_user_filters():
-    """Get filtering criteria from user"""
-    print("\n=== Purchase Data Filters ===")
-    
-    # Vendor filter
-    print("1. Vendor Filter:")
-    vendor_filter = input("Enter Vendor Name (or part of it) or 'all' for all vendors: ").strip()
-    if vendor_filter.lower() == 'all':
-        vendor_filter = None
-    
-    # Date range filter
-    print("\n2. Date Range Filter:")
-    start_date = input("Enter Start Date (YYYY-MM-DD) or 'all' for no start limit: ").strip()
-    if start_date.lower() == 'all':
-        start_date = None
-    
-    end_date = input("Enter End Date (YYYY-MM-DD) or 'all' for no end limit: ").strip()
-    if end_date.lower() == 'all':
-        end_date = None
-    
-    # Payment status filter
-    print("\n3. Payment Status Filter:")
-    payment_status = input("Enter Payment Status (paid/unpaid) or 'all' for both: ").strip().lower()
-    if payment_status == 'all':
-        payment_status = None
-    
-    # Amount filter
-    print("\n4. Amount Filter:")
-    max_amount = input("Enter Maximum Bill Amount (bills under this amount) or 'all' for no limit: ").strip()
-    if max_amount.lower() == 'all':
-        max_amount = None
-    else:
-        try:
-            max_amount = float(max_amount)
-        except ValueError:
-            print("❌ Invalid amount format. Using no limit.")
-            max_amount = None
-    
-    return {
-        'vendor_filter': vendor_filter,
-        'start_date': start_date,
-        'end_date': end_date,
-        'payment_status': payment_status,
-        'max_amount': max_amount
-    }
 
-def fetch_filtered_purchases(filters):  # Fixed function name
-    """Fetch purchases from database based on filters"""
+def view_purchases(page=1, page_size=20, date_from=None, date_to=None,
+                   vendor_id=None, product_id=None, payment_status=None):
+    Session.require()
+    conn = cursor = None
     try:
-        conn = get_connection()
+        conn   = get_connection()
         cursor = conn.cursor()
 
-        # Build dynamic query - Fixed indentation and structure
-        query = """
-            SELECT p.PurchaseID,
-                   p.PurchaseDate,
-                   p.VendorID,
-                   CONCAT(v.FirstName, ' ', COALESCE(v.LastName, '')) AS VendorName,
-                   p.ProductID,
-                   pr.ProductName,
-                   p.Quantity,
-                   p.UnitCost,
-                   p.TotalAmount,
-                   p.PaymentStatus,
-                   p.DueDate,
-                   p.PaymentMethod
-            FROM Purchases p
-            JOIN Vendors v ON p.VendorID = v.VendorID
-            JOIN Products pr ON p.ProductID = pr.ProductID
-            WHERE 1=1
-        """
-        params = []
+        conds = ["pu.is_deleted=FALSE"]
+        vals  = []
+        if date_from:       conds.append("pu.purchase_date>=%s"); vals.append(date_from)
+        if date_to:         conds.append("pu.purchase_date<=%s"); vals.append(date_to)
+        if vendor_id:       conds.append("pu.vendor_id=%s");      vals.append(vendor_id)
+        if product_id:      conds.append("pu.product_id=%s");     vals.append(product_id)
+        if payment_status:  conds.append("pu.payment_status=%s"); vals.append(payment_status)
 
-        # Add vendor filter
-        if filters['vendor_filter']:
-            query += " AND v.VendorName LIKE %s"
-            params.append(f"%{filters['vendor_filter']}%")
+        where = " AND ".join(conds)
+        cursor.execute(f"SELECT COUNT(*) AS n FROM Purchases pu WHERE {where}", vals)
+        total  = cursor.fetchone()["n"]
+        pages  = max(1, -(-total // page_size))
+        offset = (page - 1) * page_size
 
-        # Add date range filters
-        if filters['start_date']:
-            query += " AND p.PurchaseDate >= %s"
-            params.append(filters['start_date'])
-
-        if filters['end_date']:
-            query += " AND p.PurchaseDate <= %s"
-            params.append(filters['end_date'])
-
-        # Add payment status filter
-        if filters['payment_status']:
-            query += " AND p.PaymentStatus = %s"
-            params.append(filters['payment_status'])
-
-        query += " ORDER BY v.VendorName, p.PurchaseDate, p.PurchaseID"
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-
-        if not rows:
-            print("⚠ No purchase records found matching the criteria.")
-            return None
-
-        # Convert to DataFrame
-        columns = ['PurchaseID', 'PurchaseDate', 'VendorID', 'VendorName', 'ProductID', 
-                  'ProductName', 'Quantity', 'UnitCost', 'TotalAmount', 'PaymentStatus',
-                  'DueDate', 'PaymentMethod']
-        
-        df = pd.DataFrame(rows, columns=columns)
-        df['PurchaseDate'] = pd.to_datetime(df['PurchaseDate'])
-        
-        return df
-
+        cursor.execute(
+            f"""SELECT pu.purchase_id, pu.purchase_date, v.vendor_name,
+                       p.product_name, pu.qty_purchased, pu.unit_cost,
+                       pu.freight_cost, pu.total, pu.payment_method,
+                       pu.payment_status, pu.due_date, pu.invoice_no
+                FROM Purchases pu
+                LEFT JOIN Vendors  v ON v.vendor_id =pu.vendor_id
+                LEFT JOIN Products p ON p.product_id=pu.product_id
+                WHERE {where}
+                ORDER BY pu.purchase_id DESC LIMIT %s OFFSET %s""",
+            vals + [page_size, offset]
+        )
+        display_table(cursor.fetchall(),
+                      f"Purchases — page {page}/{pages}, total {total}")
     except Exception as e:
-        print("❌ Error fetching purchases:", e)
-        return None
+        print(f"❌ Error: {e}")
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        if cursor: cursor.close()
+        if conn:   conn.close()
 
-def group_purchases_into_bills_silent(df, max_amount=None):  # Added missing function
-    """Group purchases by vendor and date to create bills (silent version for interactive mode)"""
-    if df is None or df.empty:
-        return [], pd.DataFrame()
 
-    # Group by VendorName and PurchaseDate
-    grouped = df.groupby(['VendorName', 'PurchaseDate'])
-    
-    bills = []
-    bill_summaries = []
-    bill_number = 1
-    
-    for (vendor_name, purchase_date), group in grouped:
-        # Calculate bill total
-        bill_total = group['TotalAmount'].sum()
-        
-        # Apply amount filter
-        if max_amount is not None and bill_total > max_amount:
-            continue
-        
-        # Create individual bill DataFrame
-        bill_df = group.copy()
-        bill_df = bill_df[['ProductName', 'Quantity', 'UnitPrice', 'TotalAmount', 'PaymentStatus', 'PaymentMethod']]
-        
-        # Store bill
-        bills.append({
-            'bill_number': bill_number,
-            'vendor_name': vendor_name,
-            'purchase_date': purchase_date,
-            'bill_dataframe': bill_df,
-            'bill_total': bill_total,
-            'payment_status': group['PaymentStatus'].iloc[0]
-        })
-        
-        # Add to summary
-        bill_summaries.append({
-            'Bill_Number': bill_number,
-            'Vendor_Name': vendor_name,
-            'Purchase_Date': purchase_date.strftime('%Y-%m-%d'),
-            'Bill_Total': bill_total,
-            'Payment_Status': group['PaymentStatus'].iloc[0].upper()
-        })
-        
-        bill_number += 1
-
-    # Create summary DataFrame
-    if bill_summaries:
-        summary_df = pd.DataFrame(bill_summaries)
-    else:
-        summary_df = pd.DataFrame()
-
-    return bills, summary_df
-
-def group_purchases_into_bills(df, max_amount=None):
-    """Group purchases by vendor and date to create bills"""
-    if df is None or df.empty:
-        return [], pd.DataFrame()
-
-    # Group by VendorName and PurchaseDate
-    grouped = df.groupby(['VendorName', 'PurchaseDate'])
-    
-    bills = []
-    bill_summaries = []
-
-    print(f"\n{'='*60}")
-    print("PURCHASE BILLS REPORT")
-    print(f"{'='*60}")
-
-    bill_number = 1
-    
-    for (vendor_name, purchase_date), group in grouped:
-        # Calculate bill total
-        bill_total = group['TotalAmount'].sum()
-        
-        # Apply amount filter
-        if max_amount is not None and bill_total > max_amount:
-            continue
-            
-        print(f"\n📋 BILL #{bill_number}")
-        print(f"Vendor: {vendor_name}")
-        print(f"Date: {purchase_date.strftime('%Y-%m-%d')}")
-        print("-" * 50)
-        
-        # Create individual bill DataFrame
-        bill_df = group.copy()
-        bill_df = bill_df[['ProductName', 'Quantity', 'UnitPrice', 'TotalAmount', 'PaymentStatus', 'PaymentMethod']]
-        
-        print(bill_df.to_string(index=False))
-        print("-" * 50)
-        print(f"BILL TOTAL: ₹{bill_total:.2f}")
-        print(f"Payment Status: {group['PaymentStatus'].iloc[0].upper()}")
-        
-        # Store bill
-        bills.append({
-            'bill_number': bill_number,
-            'vendor_name': vendor_name,
-            'purchase_date': purchase_date,
-            'bill_dataframe': bill_df,
-            'bill_total': bill_total,
-            'payment_status': group['PaymentStatus'].iloc[0]
-        })
-        
-        # Add to summary
-        bill_summaries.append({
-            'Bill_Number': bill_number,
-            'Vendor_Name': vendor_name,
-            'Purchase_Date': purchase_date.strftime('%Y-%m-%d'),
-            'Bill_Total': bill_total,
-            'Payment_Status': group['PaymentStatus'].iloc[0].upper()
-        })
-        
-        bill_number += 1
-        print(f"{'='*60}")
-
-    # Create summary DataFrame
-    if bill_summaries:
-        summary_df = pd.DataFrame(bill_summaries)
-        
-        print(f"\n📊 BILLS SUMMARY")
-        print(f"{'='*60}")
-        print(summary_df.to_string(index=False))
-        print(f"{'='*60}")
-        print(f"Total Bills: {len(bill_summaries)}")
-        print(f"Grand Total: ₹{summary_df['Bill_Total'].sum():.2f}")
-        
-        # Payment status breakdown
-        status_breakdown = summary_df.groupby('Payment_Status')['Bill_Total'].agg(['count', 'sum'])
-        print(f"\nPayment Status Breakdown:")
-        for status, data in status_breakdown.iterrows():
-            print(f"  {status}: {data['count']} bills, ₹{data['sum']:.2f}")
-        
-    else:
-        summary_df = pd.DataFrame()
-        print("\n⚠ No bills match the specified criteria.")
-
-    return bills, summary_df
-
-def export_bills_to_csv(bills, summary_df):
-    """Export bills and summary to CSV files"""
-    if not bills:
-        print("⚠ No bills to export.")
-        return
-    
-    export_choice = input("\nDo you want to export the bills to CSV? (y/n): ").strip().lower()
-    if export_choice != 'y':
-        return
-    
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Export individual bills
-    for bill in bills:
-        filename = f"bill_{bill['bill_number']}_{bill['vendor_name'].replace(' ', '_')}_{timestamp}.csv"
-        bill['bill_dataframe'].to_csv(filename, index=False)
-        print(f"💾 Bill #{bill['bill_number']} exported to {filename}")
-    
-    # Export summary - Fixed missing closing parenthesis
-    if not summary_df.empty:
-        summary_filename = f"bills_summary_{timestamp}.csv"
-        summary_df.to_csv(summary_filename, index=False)
-        print(f"💾 Bills summary exported to {summary_filename}")
-
-def display_bills_summary(bills, summary_df):
-    """Display bills summary with interactive links to individual bills"""
-    if not bills:
-        print("⚠ No bills to display.")
-        return
-    
-    print(f"\n{'='*80}")
-    print("📋 BILLS SUMMARY - INTERACTIVE VIEW")
-    print(f"{'='*80}")
-    
-    # Enhanced summary display with clickable bill numbers
-    print(f"{'Bill#':<6} {'Vendor':<20} {'Date':<12} {'Amount':<12} {'Status':<10} {'Action'}")
-    print("-" * 80)
-    
-    for bill in bills:
-        status_indicator = "✅" if bill['payment_status'].lower() == 'paid' else "❌"
-        print(f"{bill['bill_number']:<6} {bill['vendor_name']:<20} "
-              f"{bill['purchase_date'].strftime('%Y-%m-%d'):<12} "
-              f"₹{bill['bill_total']:<11.2f} {status_indicator} {bill['payment_status'].upper():<10} ")
-    
-    print("-" * 80)
-    print(f"Total Bills: {len(bills)} | Grand Total: ₹{summary_df['Bill_Total'].sum():.2f}")
-    
-    # Payment status summary
-    paid_bills = [b for b in bills if b['payment_status'].lower() == 'paid']
-    unpaid_bills = [b for b in bills if b['payment_status'].lower() == 'unpaid']
-    
-    print(f"\n💰 Payment Summary:")
-    print(f"  ✅ Paid: {len(paid_bills)} bills - ₹{sum(b['bill_total'] for b in paid_bills):.2f}")
-    print(f"  ❌ Unpaid: {len(unpaid_bills)} bills - ₹{sum(b['bill_total'] for b in unpaid_bills):.2f}")
-    print(f"{'='*80}")
-
-def interactive_bill_navigator(bills, summary_df):
-    """Interactive navigation system for bills"""
-    if not bills:
-        return
-    
-    while True:
-        # Display summary with links
-        display_bills_summary(bills, summary_df)
-        
-        print(f"\n🔗 Interactive Bill Navigator")
-        print(f"Commands:")
-        print(f"  • Enter bill number (1-{len(bills)}) to view details")
-        print(f"  • Type 'compare' to compare multiple bills")
-        print(f"  • Type 'search' to search within bills")
-        print(f"  • Type 'export' to export bills")
-        print(f"  • Type 'stats' to view statistics")
-        print(f"  • Type 'back' to return to menu")
-        
-        user_input = input(f"\nEnter command or bill number: ").strip().lower()
-        
-        if user_input == 'back':
-            break
-        elif user_input == 'compare':
-            compare_bills(bills)
-        elif user_input == 'search':
-            search_within_bills(bills)
-        elif user_input == 'export':
-            export_bills_to_csv(bills, summary_df)
-        elif user_input == 'stats':
-            show_bill_statistics(bills, summary_df)
-        elif user_input.isdigit():
-            bill_num = int(user_input)
-            if 1 <= bill_num <= len(bills):
-                display_individual_bill_with_options(bills[bill_num - 1], bills)
-            else:
-                print(f"❌ Invalid bill number. Please enter 1-{len(bills)}")
-        else:
-            print("❌ Invalid command. Please try again.")
-
-def display_individual_bill_with_options(selected_bill, all_bills):
-    """Display individual bill with navigation options"""
-    print(f"\n{'='*70}")
-    print(f"📋 BILL #{selected_bill['bill_number']} - DETAILED VIEW")
-    print(f"{'='*70}")
-    print(f"🏪 Vendor: {selected_bill['vendor_name']}")
-    print(f"📅 Date: {selected_bill['purchase_date'].strftime('%Y-%m-%d')}")
-    print(f"💳 Payment Status: {selected_bill['payment_status'].upper()}")
-    print(f"💰 Bill Total: ₹{selected_bill['bill_total']:.2f}")
-    print("-" * 70)
-    
-    # Display items in the bill
-    bill_df = selected_bill['bill_dataframe']
-    
-    # Enhanced display with item numbers
-    print(f"{'#':<3} {'Product':<20} {'Qty':<6} {'Unit Price':<12} {'Total':<12} {'Payment':<10}")
-    print("-" * 70)
-    
-    for idx, (_, row) in enumerate(bill_df.iterrows(), 1):
-        status_icon = "✅" if row['PaymentStatus'].lower() == 'paid' else "❌"
-        print(f"{idx:<3} {row['ProductName'][:19]:<20} {row['Quantity']:<6} "
-              f"₹{row['UnitPrice']:<11.2f} ₹{row['TotalAmount']:<11.2f} "
-              f"{status_icon} {row['PaymentStatus'].upper()}")
-    
-    print("-" * 70)
-    print(f"TOTAL: ₹{selected_bill['bill_total']:.2f}")
-    print(f"{'='*70}")
-    
-    # Navigation options for individual bill
-    while True: 
-        print(f"\n🔗 Bill Navigation Options:")
-        print(f"  1. Go back to bills summary")
-        print(f"  2. View next bill ({selected_bill['bill_number'] + 1 if selected_bill['bill_number'] < len(all_bills) else 'N/A'})")
-        print(f"  3. View previous bill ({selected_bill['bill_number'] - 1 if selected_bill['bill_number'] > 1 else 'N/A'})")
-        print(f"  4. Export this bill to CSV")
-        print(f"  5. Mark payment status")
-        print(f"  6. Add notes to bill")
-        
-        choice = input(f"Enter option (1-6): ").strip()
-        
-        if choice == '1':
-            break
-        elif choice == '2':
-            if selected_bill['bill_number'] < len(all_bills):
-                next_bill = next(b for b in all_bills if b['bill_number'] == selected_bill['bill_number'] + 1)
-                display_individual_bill_with_options(next_bill, all_bills)
-                break
-            else:
-                print("❌ This is the last bill.")
-        elif choice == '3':
-            if selected_bill['bill_number'] > 1:
-                prev_bill = next(b for b in all_bills if b['bill_number'] == selected_bill['bill_number'] - 1)
-                display_individual_bill_with_options(prev_bill, all_bills)
-                break
-            else:
-                print("❌ This is the first bill.")
-        elif choice == '4':
-            export_single_bill(selected_bill)
-        elif choice == '5':
-            update_bill_payment_status(selected_bill)
-        elif choice == '6':
-            add_bill_notes(selected_bill)
-        else:
-            print("❌ Invalid option.")
-
-def export_single_bill(bill):
-    """Export a single bill to CSV"""
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"bill_{bill['bill_number']}_{bill['vendor_name'].replace(' ', '_')}_{timestamp}.csv"
-    bill['bill_dataframe'].to_csv(filename, index=False)
-    print(f"💾 Bill #{bill['bill_number']} exported to {filename}")
-
-def update_bill_payment_status(bill):
-    """Update payment status of a bill"""
-    current_status = bill['payment_status']
-    new_status = 'paid' if current_status.lower() == 'unpaid' else 'unpaid'
-    
-    confirm = input(f"Change payment status from {current_status.upper()} to {new_status.upper()}? (y/n): ").strip().lower()
-    if confirm == 'y':
-        bill['payment_status'] = new_status
-        # Here you would also update the database
-        print(f"✅ Payment status updated to {new_status.upper()}")
-    else:
-        print("❌ Payment status unchanged.")
-
-def add_bill_notes(bill):
-    """Add notes to a bill"""
-    note = input("Enter note for this bill: ").strip()
-    if note:
-        if 'notes' not in bill:
-            bill['notes'] = []
-        bill['notes'].append({
-            'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'note': note
-        })
-        print("✅ Note added to bill.")
-    else:
-        print("❌ No note added.")
-
-def compare_bills(bills):
-    """Compare multiple bills side by side"""
-    print(f"\n🔄 Compare Bills")
-    print(f"Available bills: 1-{len(bills)}")
-    
+def search_purchases(date_from=None, date_to=None, vendor_id=None,
+                     product_id=None, invoice_no=None, payment_status=None,
+                     min_amount=None, max_amount=None):
+    Session.require()
+    conn = cursor = None
     try:
-        bill_numbers = input("Enter bill numbers to compare (e.g., 1,3,5): ").strip()
-        selected_numbers = [int(x.strip()) for x in bill_numbers.split(',')]
-        
-        selected_bills = []
-        for num in selected_numbers:
-            if 1 <= num <= len(bills):
-                selected_bills.append(bills[num - 1])
-            else:
-                print(f"❌ Invalid bill number: {num}")
-                return
-        
-        print(f"\n{'='*100}")
-        print(f"📊 BILL COMPARISON")
-        print(f"{'='*100}")
-        
-        # Comparison header
-        header = f"{'Metric':<20}"
-        for bill in selected_bills:
-            header += f"Bill #{bill['bill_number']:<15}"
-        print(header)
-        print("-" * 100)
-        
-        # Compare metrics
-        metrics = [
-            ("Vendor", lambda b: b['vendor_name']),
-            ("Date", lambda b: b['purchase_date'].strftime('%Y-%m-%d')),
-            ("Total Amount", lambda b: f"₹{b['bill_total']:.2f}"),
-            ("Payment Status", lambda b: b['payment_status'].upper()),
-            ("Items Count", lambda b: str(len(b['bill_dataframe']))),
-        ]
-        
-        for metric_name, metric_func in metrics:
-            row = f"{metric_name:<20}"
-            for bill in selected_bills:
-                row += f"{metric_func(bill):<15}"
-            print(row)
-        
-        print(f"{'='*100}")
-        
-    except ValueError:
-        print("❌ Invalid input format. Use comma-separated numbers.")
+        conn   = get_connection()
+        cursor = conn.cursor()
 
-def search_within_bills(bills):
-    """Search for specific products or vendors within bills"""
-    search_term = input("Enter search term (product name/vendor): ").strip().lower()
-    
-    matching_bills = []
-    for bill in bills:
-        # Search in vendor name
-        if search_term in bill['vendor_name'].lower():
-            matching_bills.append((bill, "Vendor match"))
-            continue
-        
-        # Search in products
-        for _, row in bill['bill_dataframe'].iterrows():
-            if search_term in row['ProductName'].lower():
-                matching_bills.append((bill, f"Product: {row['ProductName']}"))
-                break
-    
-    if matching_bills:
-        print(f"\n🔍 Search Results for '{search_term}':")
-        print("-" * 70)
-        for bill, match_type in matching_bills:
-            print(f"Bill #{bill['bill_number']} - {bill['vendor_name']} - {match_type} - ₹{bill['bill_total']:.2f}")
-    else:
-        print(f"❌ No matches found for '{search_term}'")
+        conds, vals = ["pu.is_deleted=FALSE"], []
+        if date_from:      conds.append("pu.purchase_date>=%s"); vals.append(date_from)
+        if date_to:        conds.append("pu.purchase_date<=%s"); vals.append(date_to)
+        if vendor_id:      conds.append("pu.vendor_id=%s");      vals.append(vendor_id)
+        if product_id:     conds.append("pu.product_id=%s");     vals.append(product_id)
+        if invoice_no:     conds.append("pu.invoice_no LIKE %s");vals.append(f"%{invoice_no}%")
+        if payment_status: conds.append("pu.payment_status=%s"); vals.append(payment_status)
+        if min_amount:     conds.append("pu.total>=%s");         vals.append(min_amount)
+        if max_amount:     conds.append("pu.total<=%s");         vals.append(max_amount)
 
-def show_bill_statistics(bills, summary_df):
-    """Show detailed statistics about the bills"""
-    print(f"\n📊 DETAILED BILL STATISTICS")
-    print(f"{'='*60}")
-    
-    # Basic stats
-    total_amount = summary_df['Bill_Total'].sum()
-    avg_bill = summary_df['Bill_Total'].mean()
-    max_bill = summary_df['Bill_Total'].max()
-    min_bill = summary_df['Bill_Total'].min()
-    
-    print(f"📋 Total Bills: {len(bills)}")
-    print(f"💰 Grand Total: ₹{total_amount:.2f}")
-    print(f"📊 Average Bill: ₹{avg_bill:.2f}")
-    print(f"📈 Highest Bill: ₹{max_bill:.2f}")
-    print(f"📉 Lowest Bill: ₹{min_bill:.2f}")
-    
-    # Payment status breakdown
-    paid_bills = [b for b in bills if b['payment_status'].lower() == 'paid']
-    unpaid_bills = [b for b in bills if b['payment_status'].lower() == 'unpaid']
-    
-    print(f"\n💳 Payment Status:")
-    print(f"  ✅ Paid: {len(paid_bills)} bills ({len(paid_bills)/len(bills)*100:.1f}%)")
-    print(f"  ❌ Unpaid: {len(unpaid_bills)} bills ({len(unpaid_bills)/len(bills)*100:.1f}%)")
-    
-    # Vendor breakdown
-    vendor_stats = {}
-    for bill in bills:
-        vendor = bill['vendor_name']
-        if vendor not in vendor_stats:
-            vendor_stats[vendor] = {'count': 0, 'total': 0}
-        vendor_stats[vendor]['count'] += 1
-        vendor_stats[vendor]['total'] += bill['bill_total']
-    
-    print(f"\n🏪 Top Vendors:")
-    sorted_vendors = sorted(vendor_stats.items(), key=lambda x: x[1]['total'], reverse=True)
-    for i, (vendor, stats) in enumerate(sorted_vendors[:5], 1):
-        print(f"  {i}. {vendor}: {stats['count']} bills, ₹{stats['total']:.2f}")
-
-def advanced_purchases_viewer():
-    """Main function for advanced purchase viewing with filtering and grouping"""
-    print("\n🔍 Advanced Purchases Viewer")
-    
-    # Get filters from user
-    filters = get_user_filters()
-    
-    # Fetch filtered data
-    print("\n📊 Fetching purchase data...")
-    df = fetch_filtered_purchases(filters)  # Fixed function name
-    
-    if df is None:
-        return
-    
-    print(f"✅ Found {len(df)} purchase records matching criteria.")
-    
-    # Group into bills and display
-    bills, summary_df = group_purchases_into_bills_silent(df, filters['max_amount'])
-    
-    if bills:
-        # Start interactive navigation
-        interactive_bill_navigator(bills, summary_df)
-    
-    return bills, summary_df
-
-def show_detailed_breakdown(bills, summary_df):
-    """Show detailed breakdown of specific bills"""
-    if not bills:
-        return
-        
-    print(f"\nAvailable Bills (1-{len(bills)}):")
-    for bill in bills:
-        print(f"  {bill['bill_number']}. {bill['vendor_name']} - {bill['purchase_date'].strftime('%Y-%m-%d')} - ₹{bill['bill_total']:.2f}")
-    
-    try:
-        bill_num = int(input("\nEnter bill number to view details: "))
-        selected_bill = next((b for b in bills if b['bill_number'] == bill_num), None)
-        
-        if selected_bill:
-            print(f"\n📋 DETAILED VIEW - BILL #{bill_num}")
-            print(f"Vendor: {selected_bill['vendor_name']}")
-            print(f"Date: {selected_bill['purchase_date'].strftime('%Y-%m-%d')}")
-            print(f"Payment Status: {selected_bill['payment_status'].upper()}")
-            print("-" * 60)
-            print(selected_bill['bill_dataframe'].to_string(index=False))
-            print("-" * 60)
-            print(f"TOTAL: ₹{selected_bill['bill_total']:.2f}")
-        else:
-            print("❌ Invalid bill number.")
-            
-    except ValueError:
-        print("❌ Please enter a valid number.")
-
-def generate_bill_visualizations(summary_df):
-    """Generate visualizations for the bills"""
-    if summary_df.empty:
-        print("⚠ No data to visualize.")
-        return
-    
-    print("\nGenerating visualizations...")
-    
-    try:
-        # 1. Bills by Vendor
-        plt.figure(figsize=(12, 6))
-        vendor_totals = summary_df.groupby('Vendor_Name')['Bill_Total'].sum().sort_values(ascending=False)
-        
-        plt.subplot(1, 2, 1)
-        vendor_totals.plot(kind='bar')
-        plt.title('Total Amount by Vendor')
-        plt.xlabel('Vendor')
-        plt.ylabel('Amount (₹)')
-        plt.xticks(rotation=45)
-        plt.grid(True, alpha=0.3)
-        
-        # 2. Payment Status Distribution
-        plt.subplot(1, 2, 2)
-        payment_status = summary_df.groupby('Payment_Status')['Bill_Total'].sum()
-        plt.pie(payment_status.values, labels=payment_status.index, autopct='%1.1f%%')
-        plt.title('Payment Status Distribution')
-        
-        plt.tight_layout()
-        plt.show()
-        
-        # 3. Timeline view
-        summary_df_copy = summary_df.copy()
-        summary_df_copy['Purchase_Date'] = pd.to_datetime(summary_df_copy['Purchase_Date'])
-        timeline = summary_df_copy.groupby('Purchase_Date')['Bill_Total'].sum()
-        
-        plt.figure(figsize=(10, 6))
-        timeline.plot(kind='line', marker='o')
-        plt.title('Bills Timeline')
-        plt.xlabel('Date')
-        plt.ylabel('Amount (₹)')
-        plt.grid(True, alpha=0.3)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.show()
-        
+        cursor.execute(
+            f"""SELECT pu.purchase_id, pu.purchase_date, v.vendor_name,
+                       p.product_name, pu.qty_purchased, pu.total,
+                       pu.payment_method, pu.payment_status, pu.due_date
+                FROM Purchases pu
+                LEFT JOIN Vendors  v ON v.vendor_id =pu.vendor_id
+                LEFT JOIN Products p ON p.product_id=pu.product_id
+                WHERE {' AND '.join(conds)}
+                ORDER BY pu.purchase_date DESC""",
+            vals
+        )
+        rows = cursor.fetchall()
+        display_table(rows, f"Purchase Search — {len(rows)} result(s)")
+        return rows
     except Exception as e:
-        print(f"❌ Error generating visualizations: {e}")
+        print(f"❌ Error: {e}"); return []
+    finally:
+        if cursor: cursor.close()
+        if conn:   conn.close()
+
+
+def update_purchase(purchase_id: int):
+    user = Session.require_role("admin", "manager", "accountant")
+    conn = cursor = None
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM Purchases WHERE purchase_id=%s AND is_deleted=FALSE",
+            (purchase_id,)
+        )
+        old = cursor.fetchone()
+        if not old:
+            print("❌ Purchase not found."); return
+
+        print(f"\nPurchase #{purchase_id}  |  Total: ₹{old['total']}")
+        print("  Only invoice_no and payment_status can be soft-updated here.")
+
+        updates, values, changed = [], [], {}
+
+        inv = input(f"  Invoice No [{old['invoice_no']}]: ").strip()
+        if inv and inv != str(old["invoice_no"] or ""):
+            updates.append("invoice_no=%s"); values.append(inv)
+            changed["invoice_no"] = {"old": old["invoice_no"], "new": inv}
+
+        ps = input(f"  Payment Status [{old['payment_status']}] (paid/pending/partial): ").strip().lower()
+        if ps and ps != old["payment_status"]:
+            updates.append("payment_status=%s"); values.append(ps)
+            changed["payment_status"] = {"old": old["payment_status"], "new": ps}
+
+        if not updates:
+            print("⚠️  No changes."); return
+
+        reason = input("Reason               : ").strip()
+        if not reason:
+            print("❌ Reason required."); return
+
+        values.append(purchase_id)
+        conn.begin()
+        cursor.execute(
+            f"UPDATE Purchases SET {', '.join(updates)} WHERE purchase_id=%s", values
+        )
+        conn.commit()
+        log_audit("Purchases", purchase_id, "UPDATE",
+                  old_value={k: old[k] for k in changed},
+                  new_value={k: v["new"] for k, v in changed.items()},
+                  changed_fields=", ".join(changed.keys()), reason=reason)
+        print(f"✅ Purchase #{purchase_id} updated.")
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"❌ Error: {e}")
+    finally:
+        if cursor: cursor.close()
+        if conn:   conn.close()
+
+
+def soft_delete_purchase(purchase_id: int):
+    user = Session.require_role("admin", "manager")
+    conn = cursor = None
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM Purchases WHERE purchase_id=%s AND is_deleted=FALSE",
+            (purchase_id,)
+        )
+        pur = cursor.fetchone()
+        if not pur:
+            print("❌ Purchase not found."); return
+
+        reason = input("Reason               : ").strip()
+        if not reason: print("❌ Reason required."); return
+        if not confirm(f"Soft-delete Purchase #{purchase_id}? (y/n): "):
+            print("Cancelled."); return
+
+        conn.begin()
+        cursor.execute(
+            "UPDATE Purchases SET is_deleted=TRUE WHERE purchase_id=%s", (purchase_id,)
+        )
+        # Deduct the lot that was created for this purchase
+        cursor.execute(
+            "UPDATE Inventory_Lots SET is_deleted=TRUE WHERE purchase_id=%s",
+            (purchase_id,)
+        )
+        conn.commit()
+        log_audit("Purchases", purchase_id, "SOFT_DELETE",
+                  old_value=dict(pur), reason=reason)
+        print(f"✅ Purchase #{purchase_id} soft-deleted. Associated lot hidden.")
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"❌ Error: {e}")
+    finally:
+        if cursor: cursor.close()
+        if conn:   conn.close()
+
+
+def purchase_insights(vendor_id: int = None):
+    Session.require()
+    conn = cursor = None
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+
+        where = "pu.is_deleted=FALSE"
+        vals  = []
+        if vendor_id:
+            where += " AND pu.vendor_id=%s"; vals.append(vendor_id)
+
+        cursor.execute(
+            f"""SELECT COUNT(*) AS orders,
+                       SUM(pu.total) AS total_spend,
+                       AVG(pu.total) AS avg_order,
+                       MAX(pu.purchase_date) AS last_order,
+                       SUM(CASE WHEN pu.payment_status='pending'
+                                THEN pu.total ELSE 0 END) AS outstanding_ap
+                FROM Purchases pu WHERE {where}""",
+            vals
+        )
+        s = cursor.fetchone()
+
+        cursor.execute(
+            f"""SELECT p.product_name, SUM(pu.qty_purchased) AS qty_bought,
+                       SUM(pu.total) AS spend
+                FROM Purchases pu JOIN Products p ON p.product_id=pu.product_id
+                WHERE {where}
+                GROUP BY p.product_id ORDER BY spend DESC LIMIT 5""",
+            vals
+        )
+        top = cursor.fetchall()
+
+        label = f"Vendor #{vendor_id}" if vendor_id else "All Vendors"
+        W = 60
+        print(f"\n{'═'*W}")
+        print(f"  Purchase Insights — {label}")
+        print(f"{'═'*W}")
+        print(f"  Orders          : {s['orders'] or 0}")
+        print(f"  Total Spent     : ₹{(s['total_spend'] or 0):>12,.2f}")
+        print(f"  Avg Order       : ₹{(s['avg_order'] or 0):>12,.2f}")
+        print(f"  Last Order      : {s['last_order'] or '—'}")
+        print(f"  Outstanding AP  : ₹{(s['outstanding_ap'] or 0):>12,.2f}")
+        if top:
+            print(f"{'─'*W}")
+            print("  Top Products:")
+            for p in top:
+                print(f"    {p['product_name']:<32} ₹{p['spend']:>10,.2f}")
+        print(f"{'═'*W}")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+    finally:
+        if cursor: cursor.close()
+        if conn:   conn.close()
+
 
 def purchase_menu():
-    """Main purchases menu with all options"""
-    print("\n--- Enhanced Purchases Menu ---")
-    print("1. Record Purchases")
-    print("2. Advanced Purchases Viewer (with filters & bill grouping)")
-    print("3. Generate Bill Visualizations")
-    print("4. Back to Main Menu")
-
     while True:
-        choice = input("Enter option (1-5): ").strip()
-        if choice == "1":
-            record_purchases()
-        elif choice == "2":
-            advanced_purchases_viewer()
-        elif choice == "3":
-            # Quick visualization option
-            filters = get_user_filters()
-            df = fetch_filtered_purchases(filters)
-            if df is not None:
-                bills, summary_df = group_purchases_into_bills_silent(df, filters['max_amount'])
-                if not summary_df.empty:
-                    generate_bill_visualizations(summary_df)
-                else:
-                    print("⚠ No data to visualize.")
-        elif choice == "4":
-            break
-        else:
-            print("❌ Invalid option. Please choose 1-4.")
-            
-if __name__ == "__main__":
-    purchase_menu()
+        print("""
+╔════════════════════════════════╗
+║      PURCHASE MANAGEMENT       ║
+╠════════════════════════════════╣
+║  1. Record Purchase            ║
+║  2. View Purchases             ║
+║  3. Search Purchases           ║
+║  4. Update Purchase            ║
+║  5. Delete Purchase (Soft)     ║
+║  6. Purchase Insights          ║
+║  0. Back                       ║
+╚════════════════════════════════╝""")
+        choice = input("Select: ").strip()
+        try:
+            if   choice == "1": record_purchase()
+            elif choice == "2":
+                pg = safe_int("Page [1]: ", allow_blank=True) or 1
+                view_purchases(page=pg)
+            elif choice == "3":
+                df  = safe_date("From    : ", allow_blank=True)
+                dt  = safe_date("To      : ", allow_blank=True)
+                vid = safe_int("Vendor  : ", allow_blank=True)
+                pid = safe_int("Product : ", allow_blank=True)
+                inv = input("Invoice : ").strip() or None
+                ps  = input("Status  : ").strip() or None
+                search_purchases(date_from=df, date_to=dt, vendor_id=vid,
+                                 product_id=pid, invoice_no=inv, payment_status=ps)
+            elif choice == "4":
+                pid = safe_int("Purchase ID to update : ")
+                if pid: update_purchase(pid)
+            elif choice == "5":
+                pid = safe_int("Purchase ID to delete : ")
+                if pid: soft_delete_purchase(pid)
+            elif choice == "6":
+                vid = safe_int("Vendor ID [blank=all] : ", allow_blank=True)
+                purchase_insights(vid)
+            elif choice == "0": break
+            else: print("❌ Invalid option.")
+        except PermissionError as e:
+            print(f"🔒 {e}")

@@ -14,19 +14,21 @@
 --   8.  Products
 --   9.  Inventory_Lots
 --   10. Inventory_Movements
---   11. Sales
---   12. Sales_Return
---   13. Purchases
---   14. Purchase_Return
---   15. Employees
---   16. Attendance
---   17. Payroll
---   18. Cash_Transactions
---   19. Bank_Transactions
---   20. Expenses
---   21. Notifications
---   22. Audit_Log
---   23. Backups
+--   11. Sales_Orders   (invoice header)
+--   12. Sales_Lines    (per-product line items)
+--   13. Sales_Return
+--   14. Purchase_Orders (invoice header)
+--   15. Purchase_Lines  (per-product line items)
+--   16. Purchase_Return
+--   17. Employees
+--   18. Attendance
+--   19. Payroll
+--   20. Cash_Transactions
+--   21. Bank_Transactions
+--   22. Expenses
+--   23. Notifications
+--   24. Audit_Log
+--   25. Backups
 --
 -- DESIGN PRINCIPLES:
 --   - Soft deletes on all operational tables (is_deleted flag)
@@ -125,8 +127,10 @@ COMMENT='Login session tracking for audit and security';
 CREATE TABLE IF NOT EXISTS Vendors (
     vendor_id           INT             AUTO_INCREMENT PRIMARY KEY,
     vendor_name         VARCHAR(100)    NOT NULL,
-    email               VARCHAR(100)    NOT NULL UNIQUE,
-    phone               VARCHAR(20)     NOT NULL UNIQUE,
+    -- FIX: phone/email are NOT UNIQUE — a company may have multiple contacts
+    -- and walk-in customers may share numbers. Indexes retained for lookup speed.
+    email               VARCHAR(100)    NOT NULL,
+    phone               VARCHAR(20)     NOT NULL,
     address             VARCHAR(200)    NOT NULL,
     city                VARCHAR(50)     NOT NULL,
     state               VARCHAR(50)     NOT NULL,
@@ -141,6 +145,8 @@ CREATE TABLE IF NOT EXISTS Vendors (
 
     FOREIGN KEY (created_by) REFERENCES Users(user_id) ON DELETE SET NULL,
     INDEX idx_vendors_name    (vendor_name),
+    INDEX idx_vendors_email   (email),
+    INDEX idx_vendors_phone   (phone),
     INDEX idx_vendors_city    (city),
     INDEX idx_vendors_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -158,8 +164,10 @@ COMMENT='Vendor/supplier master records';
 CREATE TABLE IF NOT EXISTS Customers (
     customer_id   INT           AUTO_INCREMENT PRIMARY KEY,
     customer_name VARCHAR(100)  NOT NULL,
-    phone         VARCHAR(20)   NOT NULL UNIQUE,
-    email         VARCHAR(100)  NOT NULL UNIQUE,
+    -- FIX: phone/email are NOT UNIQUE — walk-in customers may refuse contact
+    -- details, and families often share a single phone/email. Indexed for search.
+    phone         VARCHAR(20)   DEFAULT NULL               COMMENT 'Optional — walk-in customers may not provide',
+    email         VARCHAR(100)  DEFAULT NULL               COMMENT 'Optional — walk-in customers may not provide',
     address       VARCHAR(200)  NOT NULL,
     city          VARCHAR(50)   NOT NULL,
     state         VARCHAR(50)   NOT NULL,
@@ -278,6 +286,7 @@ CREATE TABLE IF NOT EXISTS Inventory_Lots (
     updated_at   TIMESTAMP     NULL     DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
 
     FOREIGN KEY (product_id) REFERENCES Products(product_id) ON DELETE RESTRICT,
+    FOREIGN KEY (purchase_id) REFERENCES Purchase_Orders(purchase_order_id) ON DELETE SET NULL,
     INDEX idx_lots_product   (product_id),
     INDEX idx_lots_exp_date  (exp_date),
     INDEX idx_lots_deleted   (is_deleted)
@@ -326,23 +335,18 @@ COMMENT='Immutable stock movement log — every inventory event recorded here';
 
 -- ============================================================================
 -- SECTION 5 — SALES MANAGEMENT
+-- FIX (Issue 1): Separated into Sales_Orders (header) and Sales_Lines (detail)
+-- This allows grouping multiple products under one invoice/checkout basket.
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
--- 5.1 Sales
--- Sales transaction header
+-- 5.1 Sales_Orders
+-- One row per customer checkout / invoice. Captures who, when, and how.
 -- ----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS Sales (
-    sale_id        INT              AUTO_INCREMENT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS Sales_Orders (
+    sale_order_id  INT              AUTO_INCREMENT PRIMARY KEY,
     sale_date      DATE             NOT NULL,
     customer_id    INT              DEFAULT NULL           COMMENT 'NULL = walk-in customer',
-    product_id     INT              NOT NULL,
-    lot_id         INT              DEFAULT NULL,
-    qty_sold       INT              NOT NULL DEFAULT 1,
-    unit_price     DECIMAL(12,2)    NOT NULL,
-    discount_pct   DECIMAL(5,2)     NOT NULL DEFAULT 0.00  COMMENT 'Discount percentage applied',
-    gst_amount     DECIMAL(12,2)    NOT NULL DEFAULT 0.00,
-    total          DECIMAL(12,2)    NOT NULL,
     payment_method ENUM(
                        'cash',
                        'card',
@@ -351,32 +355,64 @@ CREATE TABLE IF NOT EXISTS Sales (
                        'credit'
                    ) NOT NULL DEFAULT 'cash',
     payment_status ENUM('paid', 'pending', 'partial') NOT NULL DEFAULT 'paid',
+    -- Aggregated totals (computed from Sales_Lines for reporting convenience)
+    subtotal       DECIMAL(12,2)    NOT NULL DEFAULT 0.00  COMMENT 'Sum of all line gross amounts before discount',
+    total_discount DECIMAL(12,2)    NOT NULL DEFAULT 0.00  COMMENT 'Sum of all line discounts',
+    total_gst      DECIMAL(12,2)    NOT NULL DEFAULT 0.00  COMMENT 'Sum of all line GST amounts',
+    grand_total    DECIMAL(12,2)    NOT NULL DEFAULT 0.00  COMMENT 'Net amount customer pays',
     processed_by   INT              DEFAULT NULL           COMMENT 'Cashier user_id',
+    notes          VARCHAR(255)     DEFAULT NULL,
     is_deleted     BOOLEAN          NOT NULL DEFAULT FALSE,
     created_at     TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at     TIMESTAMP        NULL     DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
 
     FOREIGN KEY (customer_id)  REFERENCES Customers(customer_id) ON DELETE RESTRICT,
-    FOREIGN KEY (product_id)   REFERENCES Products(product_id)   ON DELETE RESTRICT,
-    FOREIGN KEY (lot_id)       REFERENCES Inventory_Lots(lot_id) ON DELETE SET NULL,
     FOREIGN KEY (processed_by) REFERENCES Users(user_id)         ON DELETE SET NULL,
-    INDEX idx_sales_date         (sale_date),
-    INDEX idx_sales_customer     (customer_id),
-    INDEX idx_sales_product      (product_id),
-    INDEX idx_sales_payment      (payment_method),
-    INDEX idx_sales_status       (payment_status),
-    INDEX idx_sales_processed_by (processed_by),
-    INDEX idx_sales_deleted      (is_deleted)
+    INDEX idx_so_date         (sale_date),
+    INDEX idx_so_customer     (customer_id),
+    INDEX idx_so_payment      (payment_method),
+    INDEX idx_so_status       (payment_status),
+    INDEX idx_so_processed_by (processed_by),
+    INDEX idx_so_deleted      (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Sales transaction records';
+COMMENT='Sales order headers — one row per checkout basket or invoice';
 
 -- ----------------------------------------------------------------------------
--- 5.2 Sales_Return
--- Customer returns against a sale
+-- 5.2 Sales_Lines
+-- One row per product within a Sales_Order. Carries all item-level detail.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS Sales_Lines (
+    sale_line_id   INT              AUTO_INCREMENT PRIMARY KEY,
+    sale_order_id  INT              NOT NULL               COMMENT 'FK to Sales_Orders',
+    product_id     INT              NOT NULL,
+    lot_id         INT              DEFAULT NULL           COMMENT 'FIFO lot from which stock was deducted',
+    qty_sold       INT              NOT NULL DEFAULT 1,
+    unit_price     DECIMAL(12,2)    NOT NULL,
+    discount_pct   DECIMAL(5,2)     NOT NULL DEFAULT 0.00  COMMENT 'Line-level discount percentage',
+    discount_amount DECIMAL(12,2)   NOT NULL DEFAULT 0.00  COMMENT 'Computed: unit_price * qty * discount_pct / 100',
+    gst_percent    DECIMAL(5,2)     NOT NULL DEFAULT 0.00,
+    gst_amount     DECIMAL(12,2)    NOT NULL DEFAULT 0.00,
+    line_total     DECIMAL(12,2)    NOT NULL               COMMENT '(unit_price * qty - discount) + gst',
+    cogs_amount    DECIMAL(12,2)    NOT NULL DEFAULT 0.00  COMMENT 'Weighted-avg COGS for this line',
+    created_at     TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (sale_order_id) REFERENCES Sales_Orders(sale_order_id) ON DELETE RESTRICT,
+    FOREIGN KEY (product_id)    REFERENCES Products(product_id)        ON DELETE RESTRICT,
+    FOREIGN KEY (lot_id)        REFERENCES Inventory_Lots(lot_id)      ON DELETE SET NULL,
+    INDEX idx_sl_order    (sale_order_id),
+    INDEX idx_sl_product  (product_id),
+    INDEX idx_sl_lot      (lot_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Sales line items — one row per product per order';
+
+-- ----------------------------------------------------------------------------
+-- 5.3 Sales_Return
+-- Customer returns against a specific sales line item.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS Sales_Return (
     sales_return_id  INT             AUTO_INCREMENT PRIMARY KEY,
-    sale_id          INT             NOT NULL,
+    sale_order_id    INT             NOT NULL               COMMENT 'FK to Sales_Orders',
+    sale_line_id     INT             DEFAULT NULL           COMMENT 'Specific line being returned (NULL = whole order)',
     customer_id      INT             DEFAULT NULL,
     product_id       INT             NOT NULL,
     return_date      DATE            NOT NULL,
@@ -389,69 +425,99 @@ CREATE TABLE IF NOT EXISTS Sales_Return (
     created_at       TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at       TIMESTAMP       NULL     DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (sale_id)      REFERENCES Sales(sale_id)           ON DELETE RESTRICT,
-    FOREIGN KEY (customer_id)  REFERENCES Customers(customer_id)   ON DELETE SET NULL,
-    FOREIGN KEY (product_id)   REFERENCES Products(product_id)     ON DELETE RESTRICT,
-    FOREIGN KEY (processed_by) REFERENCES Users(user_id)           ON DELETE SET NULL,
-    INDEX idx_sales_ret_sale      (sale_id),
-    INDEX idx_sales_ret_customer  (customer_id),
-    INDEX idx_sales_ret_date      (return_date),
-    INDEX idx_sales_ret_status    (status)
+    FOREIGN KEY (sale_order_id) REFERENCES Sales_Orders(sale_order_id)  ON DELETE RESTRICT,
+    FOREIGN KEY (sale_line_id)  REFERENCES Sales_Lines(sale_line_id)    ON DELETE SET NULL,
+    FOREIGN KEY (customer_id)   REFERENCES Customers(customer_id)        ON DELETE SET NULL,
+    FOREIGN KEY (product_id)    REFERENCES Products(product_id)          ON DELETE RESTRICT,
+    FOREIGN KEY (processed_by)  REFERENCES Users(user_id)                ON DELETE SET NULL,
+    INDEX idx_sales_ret_order   (sale_order_id),
+    INDEX idx_sales_ret_line    (sale_line_id),
+    INDEX idx_sales_ret_customer (customer_id),
+    INDEX idx_sales_ret_date    (return_date),
+    INDEX idx_sales_ret_status  (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Customer return transactions linked to original sales';
+COMMENT='Customer return transactions linked to original sales lines';
 
 
 -- ============================================================================
 -- SECTION 6 — PURCHASE MANAGEMENT
+-- FIX (Issue 1): Separated into Purchase_Orders (header) and Purchase_Lines (detail)
+-- This allows one vendor invoice to cover multiple products.
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
--- 6.1 Purchases
--- Vendor purchase transaction header
+-- 6.1 Purchase_Orders
+-- One row per vendor invoice. Captures who, when, how, and payment terms.
 -- ----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS Purchases (
-    purchase_id      INT             AUTO_INCREMENT PRIMARY KEY,
-    vendor_id        INT             NOT NULL,
-    product_id       INT             NOT NULL,
-    purchase_date    DATE            NOT NULL,
-    qty_purchased    INT             NOT NULL,
-    unit_cost        DECIMAL(12,2)   NOT NULL,
-    freight_cost     DECIMAL(12,2)   NOT NULL DEFAULT 0.00 COMMENT 'Shipping/freight added to landed cost',
-    total            DECIMAL(12,2)   NOT NULL,
-    due_date         DATE            NOT NULL               COMMENT 'Payment due date based on credit period',
-    payment_method   ENUM(
-                         'cash',
-                         'card',
-                         'net_banking',
-                         'upi',
-                         'credit'
-                     ) NOT NULL DEFAULT 'credit',
-    payment_status   ENUM('paid', 'pending', 'partial')    NOT NULL DEFAULT 'pending',
-    invoice_no       VARCHAR(100)    DEFAULT NULL           COMMENT 'Vendor invoice number',
-    is_deleted       BOOLEAN         NOT NULL DEFAULT FALSE,
-    created_by       INT             DEFAULT NULL,
-    created_at       TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at       TIMESTAMP       NULL     DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+CREATE TABLE IF NOT EXISTS Purchase_Orders (
+    purchase_order_id  INT             AUTO_INCREMENT PRIMARY KEY,
+    vendor_id          INT             NOT NULL,
+    purchase_date      DATE            NOT NULL,
+    due_date           DATE            NOT NULL               COMMENT 'Payment due date based on vendor credit period',
+    payment_method     ENUM(
+                           'cash',
+                           'card',
+                           'net_banking',
+                           'upi',
+                           'credit'
+                       ) NOT NULL DEFAULT 'credit',
+    payment_status     ENUM('paid', 'pending', 'partial')    NOT NULL DEFAULT 'pending',
+    invoice_no         VARCHAR(100)    DEFAULT NULL           COMMENT 'Vendor invoice / bill number',
+    -- Aggregated totals (computed from Purchase_Lines for reporting convenience)
+    total_before_gst   DECIMAL(12,2)   NOT NULL DEFAULT 0.00,
+    total_gst          DECIMAL(12,2)   NOT NULL DEFAULT 0.00,
+    total_freight      DECIMAL(12,2)   NOT NULL DEFAULT 0.00  COMMENT 'Shared freight across all lines',
+    grand_total        DECIMAL(12,2)   NOT NULL DEFAULT 0.00,
+    notes              VARCHAR(255)    DEFAULT NULL,
+    is_deleted         BOOLEAN         NOT NULL DEFAULT FALSE,
+    created_by         INT             DEFAULT NULL,
+    created_at         TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP       NULL     DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (vendor_id)   REFERENCES Vendors(vendor_id)   ON DELETE RESTRICT,
-    FOREIGN KEY (product_id)  REFERENCES Products(product_id) ON DELETE RESTRICT,
-    FOREIGN KEY (created_by)  REFERENCES Users(user_id)       ON DELETE SET NULL,
-    INDEX idx_purchases_vendor   (vendor_id),
-    INDEX idx_purchases_product  (product_id),
-    INDEX idx_purchases_date     (purchase_date),
-    INDEX idx_purchases_due_date (due_date),
-    INDEX idx_purchases_status   (payment_status),
-    INDEX idx_purchases_deleted  (is_deleted)
+    FOREIGN KEY (vendor_id)  REFERENCES Vendors(vendor_id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES Users(user_id)     ON DELETE SET NULL,
+    INDEX idx_po_vendor      (vendor_id),
+    INDEX idx_po_date        (purchase_date),
+    INDEX idx_po_due_date    (due_date),
+    INDEX idx_po_status      (payment_status),
+    INDEX idx_po_invoice     (invoice_no),
+    INDEX idx_po_deleted     (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Vendor purchase records with landed cost tracking';
+COMMENT='Purchase order headers — one row per vendor invoice';
 
 -- ----------------------------------------------------------------------------
--- 6.2 Purchase_Return
--- Returns to vendor against a purchase
+-- 6.2 Purchase_Lines
+-- One row per product within a Purchase_Order. Carries item-level cost detail.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS Purchase_Lines (
+    purchase_line_id   INT             AUTO_INCREMENT PRIMARY KEY,
+    purchase_order_id  INT             NOT NULL               COMMENT 'FK to Purchase_Orders',
+    product_id         INT             NOT NULL,
+    qty_purchased      INT             NOT NULL,
+    unit_cost          DECIMAL(12,2)   NOT NULL,
+    freight_cost       DECIMAL(12,2)   NOT NULL DEFAULT 0.00  COMMENT 'Line-level freight allocation',
+    gst_percent        DECIMAL(5,2)    NOT NULL DEFAULT 0.00,
+    gst_amount         DECIMAL(12,2)   NOT NULL DEFAULT 0.00,
+    line_total         DECIMAL(12,2)   NOT NULL               COMMENT '(unit_cost * qty + freight) + gst',
+    exp_date           DATE            DEFAULT NULL,
+    batch_no           VARCHAR(50)     DEFAULT NULL,
+    created_at         TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (purchase_order_id) REFERENCES Purchase_Orders(purchase_order_id) ON DELETE RESTRICT,
+    FOREIGN KEY (product_id)        REFERENCES Products(product_id)               ON DELETE RESTRICT,
+    INDEX idx_pl_order    (purchase_order_id),
+    INDEX idx_pl_product  (product_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Purchase line items — one row per product per order';
+
+-- ----------------------------------------------------------------------------
+-- 6.3 Purchase_Return
+-- Returns to vendor — now references a specific Purchase_Line.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS Purchase_Return (
     purchase_return_id  INT             AUTO_INCREMENT PRIMARY KEY,
-    purchase_id         INT             NOT NULL,
+    purchase_order_id   INT             NOT NULL               COMMENT 'FK to Purchase_Orders',
+    purchase_line_id    INT             DEFAULT NULL           COMMENT 'Specific line being returned',
     vendor_id           INT             NOT NULL,
     product_id          INT             NOT NULL,
     return_date         DATE            NOT NULL,
@@ -464,16 +530,18 @@ CREATE TABLE IF NOT EXISTS Purchase_Return (
     created_at          TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at          TIMESTAMP       NULL     DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (purchase_id)  REFERENCES Purchases(purchase_id) ON DELETE RESTRICT,
-    FOREIGN KEY (vendor_id)    REFERENCES Vendors(vendor_id)     ON DELETE RESTRICT,
-    FOREIGN KEY (product_id)   REFERENCES Products(product_id)   ON DELETE RESTRICT,
-    FOREIGN KEY (processed_by) REFERENCES Users(user_id)         ON DELETE SET NULL,
-    INDEX idx_pur_ret_purchase (purchase_id),
-    INDEX idx_pur_ret_vendor   (vendor_id),
-    INDEX idx_pur_ret_date     (return_date),
-    INDEX idx_pur_ret_status   (status)
+    FOREIGN KEY (purchase_order_id) REFERENCES Purchase_Orders(purchase_order_id) ON DELETE RESTRICT,
+    FOREIGN KEY (purchase_line_id)  REFERENCES Purchase_Lines(purchase_line_id)   ON DELETE SET NULL,
+    FOREIGN KEY (vendor_id)         REFERENCES Vendors(vendor_id)                 ON DELETE RESTRICT,
+    FOREIGN KEY (product_id)        REFERENCES Products(product_id)               ON DELETE RESTRICT,
+    FOREIGN KEY (processed_by)      REFERENCES Users(user_id)                     ON DELETE SET NULL,
+    INDEX idx_pur_ret_order   (purchase_order_id),
+    INDEX idx_pur_ret_line    (purchase_line_id),
+    INDEX idx_pur_ret_vendor  (vendor_id),
+    INDEX idx_pur_ret_date    (return_date),
+    INDEX idx_pur_ret_status  (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Return transactions sent back to vendors';
+COMMENT='Return transactions sent back to vendors, linked to specific purchase lines';
 
 
 -- ============================================================================
@@ -779,15 +847,6 @@ COMMENT='Backup job registry — tracks all CSV and SQL backup runs';
 
 
 -- ============================================================================
--- FOREIGN KEYS DEFERRED (added after all tables exist)
--- Inventory_Lots.purchase_id → Purchases.purchase_id
--- ============================================================================
-ALTER TABLE Inventory_Lots
-    ADD CONSTRAINT fk_lots_purchase
-    FOREIGN KEY (purchase_id) REFERENCES Purchases(purchase_id) ON DELETE SET NULL;
-
-
--- ============================================================================
 -- END OF SCHEMA
 -- ============================================================================
 -- Tables created:
@@ -795,11 +854,11 @@ ALTER TABLE Inventory_Lots
 --   Vendors, Customers,
 --   Expense_Categories, Categories, Products,
 --   Inventory_Lots, Inventory_Movements,
---   Sales, Sales_Return,
---   Purchases, Purchase_Return,
+--   Sales_Orders, Sales_Lines, Sales_Return,
+--   Purchase_Orders, Purchase_Lines, Purchase_Return,
 --   Employees, Attendance, Payroll,
 --   Cash_Transactions, Bank_Transactions, Expenses,
 --   Notifications, Audit_Log, Backups
 --
--- Total: 23 tables
+-- Total: 25 tables (was 23; +Sales_Lines, +Purchase_Lines)
 -- ============================================================================

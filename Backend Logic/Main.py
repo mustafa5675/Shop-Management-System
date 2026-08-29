@@ -37,11 +37,9 @@ def _import_menus():
     from Vendors          import vendors_menu
     from Products         import products_menu
     from Sales            import sales_menu
-    from modules          import (
-        sales_return_menu,
-        purchase_menu,
-        purchase_return_menu,
-    )
+    from SalesReturn      import sales_return_menu
+    from Purchase         import purchase_menu
+    from PurchaseReturn   import purchase_return_menu
     return {
         "customers"        : customers_menu,
         "vendors"          : vendors_menu,
